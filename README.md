@@ -13,7 +13,7 @@ make
 make install
 ```
 
-`make` builds `build/touchbarctl` and `build/TouchBarController.app`. `make install` copies the app to `~/Applications`, clears this app's old Accessibility and keyboard event-posting approvals, installs a per-user LaunchAgent, and starts it. The app runs without a Dock icon and starts again at login. No `sudo` or SIP change is needed. On a fresh install, the selected mode is the normal macOS Touch Bar.
+`make` builds `build/touchbarctl` and `build/TouchBarController.app`. `make install` stops the running app, replaces it in `~/Applications`, clears this app's old Accessibility and keyboard event-posting approvals, installs a per-user LaunchAgent, and starts it. The app runs without a Dock icon and starts again at login. No `sudo` or SIP change is needed. On a fresh install, the selected mode is the normal macOS Touch Bar.
 
 The app bundle includes its own copy of `touchbarctl`, so it works from any install path. The CLI in `build/` is available for manual use:
 

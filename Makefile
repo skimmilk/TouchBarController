@@ -5,6 +5,7 @@ CLI = $(BUILD_DIR)/touchbarctl
 APP = $(BUILD_DIR)/TouchBarController.app
 APP_BINARY = $(APP)/Contents/MacOS/TouchBarController
 INSTALL_APP = $(HOME)/Applications/TouchBarController.app
+INSTALLED_BINARY = $(INSTALL_APP)/Contents/MacOS/TouchBarController
 AGENT_PLIST = $(HOME)/Library/LaunchAgents/com.local.touchbar.controller.plist
 AGENT_LABEL = local.touchbar.controller
 
@@ -26,11 +27,19 @@ $(APP_BINARY): TouchBarController/main.m TouchBarController/GestureDetector.c To
 
 install: all
 	@if launchctl print gui/$$(id -u)/$(AGENT_LABEL) >/dev/null 2>&1; then launchctl bootout gui/$$(id -u)/$(AGENT_LABEL); fi
+	@pkill -TERM -u $$(id -u) -f -x "$(INSTALLED_BINARY)" 2>/dev/null; result=$$?; if [ $$result -gt 1 ]; then echo "Could not stop Touch Bar Controller" >&2; exit $$result; fi
+	@for attempt in 1 2 3 4 5; do \
+		pgrep -u $$(id -u) -f -x "$(INSTALLED_BINARY)" >/dev/null 2>&1; result=$$?; \
+		if [ $$result -eq 1 ]; then exit 0; fi; \
+		if [ $$result -ne 0 ]; then echo "Could not check whether Touch Bar Controller exited" >&2; exit $$result; fi; \
+		sleep 1; \
+	done; \
+	echo "Touch Bar Controller did not exit; installation stopped" >&2; exit 1
 	mkdir -p "$(HOME)/Applications" "$(HOME)/Library/LaunchAgents"
 	rm -rf "$(INSTALL_APP)"
 	ditto "$(APP)" "$(INSTALL_APP)"
 	cp TouchBarController/LaunchAgent.plist "$(AGENT_PLIST)"
-	plutil -replace ProgramArguments.0 -string "$(INSTALL_APP)/Contents/MacOS/TouchBarController" "$(AGENT_PLIST)"
+	plutil -replace ProgramArguments.0 -string "$(INSTALLED_BINARY)" "$(AGENT_PLIST)"
 	@tccutil reset Accessibility $(AGENT_LABEL) || echo "Warning: could not reset Accessibility access for $(AGENT_LABEL)" >&2
 	@tccutil reset PostEvent $(AGENT_LABEL) || echo "Warning: could not reset keyboard event-posting access for $(AGENT_LABEL)" >&2
 	launchctl bootstrap gui/$$(id -u) "$(AGENT_PLIST)"
