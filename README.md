@@ -13,7 +13,7 @@ make
 make install
 ```
 
-`make` builds `build/touchbarctl` and `build/TouchBarController.app`. `make install` copies the app to `~/Applications`, installs a per-user LaunchAgent, and starts it. The app runs without a Dock icon and starts again at login. No `sudo` or SIP change is needed. On a fresh install, the selected mode is the normal macOS Touch Bar.
+`make` builds `build/touchbarctl` and `build/TouchBarController.app`. `make install` copies the app to `~/Applications`, clears this app's old Accessibility and keyboard event-posting approvals, installs a per-user LaunchAgent, and starts it. The app runs without a Dock icon and starts again at login. No `sudo` or SIP change is needed. On a fresh install, the selected mode is the normal macOS Touch Bar.
 
 The app bundle includes its own copy of `touchbarctl`, so it works from any install path. The CLI in `build/` is available for manual use:
 
@@ -36,7 +36,7 @@ The selected mode survives app restarts. After sleep or lid open, the app turns 
 
 The shortcuts and F1–F12 key presses need access in **System Settings > Privacy & Security > Device Control and Data Access** on macOS 27. On older macOS versions, look under **Accessibility**. A tap on an F key requests keyboard event-posting access if it is missing. macOS can track that separately from Accessibility, so grant both prompts if they appear. The CLI's backlight command may also request device-control access.
 
-The app and CLI are signed ad hoc when built. Rebuilding can invalidate an existing permission entry. If the shortcuts or F keys stop working after an update, remove the old Touch Bar Controller entry in System Settings and grant the rebuilt app access again. If necessary, reset only this app's records with `tccutil reset Accessibility local.touchbar.controller` and `tccutil reset PostEvent local.touchbar.controller`, then restart the app with `launchctl kickstart -k gui/$(id -u)/local.touchbar.controller`.
+The app and CLI are signed ad hoc when built. Rebuilding can invalidate an existing permission entry, so `make install` resets this app's Accessibility and keyboard event-posting approvals before restarting it. You still need to grant the new build access in System Settings. If a reset reports an error, remove the old Touch Bar Controller entry there manually and restart the app with `launchctl kickstart -k gui/$(id -u)/local.touchbar.controller`.
 
 ## Stop or remove
 

@@ -31,6 +31,8 @@ install: all
 	ditto "$(APP)" "$(INSTALL_APP)"
 	cp TouchBarController/LaunchAgent.plist "$(AGENT_PLIST)"
 	plutil -replace ProgramArguments.0 -string "$(INSTALL_APP)/Contents/MacOS/TouchBarController" "$(AGENT_PLIST)"
+	@tccutil reset Accessibility $(AGENT_LABEL) || echo "Warning: could not reset Accessibility access for $(AGENT_LABEL)" >&2
+	@tccutil reset PostEvent $(AGENT_LABEL) || echo "Warning: could not reset keyboard event-posting access for $(AGENT_LABEL)" >&2
 	launchctl bootstrap gui/$$(id -u) "$(AGENT_PLIST)"
 
 clean:
