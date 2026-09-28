@@ -1,7 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <Carbon/Carbon.h>
-#import <IOKit/IOKitLib.h>
 #import <spawn.h>
 #import <sys/wait.h>
 
@@ -46,34 +45,6 @@ static void setBacklight(BOOL on) {
             NSLog(@"touchbarctl failed for %@", on ? @"on" : @"off");
         }
     });
-}
-
-static NSInteger backlightPowerState(void) {
-    io_iterator_t iterator = IO_OBJECT_NULL;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleARMBacklight"), &iterator) != KERN_SUCCESS) return -1;
-    NSInteger state = -1;
-    io_object_t service;
-    while ((service = IOIteratorNext(iterator))) {
-        io_object_t parent = IO_OBJECT_NULL;
-        char parentName[128] = {0};
-        if (IORegistryEntryGetParentEntry(service, kIOServicePlane, &parent) == KERN_SUCCESS) {
-            IORegistryEntryGetName(parent, parentName);
-            IOObjectRelease(parent);
-        }
-        if (strcmp(parentName, "backlight-dfr") == 0) {
-            CFTypeRef power = IORegistryEntryCreateCFProperty(service, CFSTR("IOPowerManagement"), kCFAllocatorDefault, 0);
-            if (power && CFGetTypeID(power) == CFDictionaryGetTypeID()) {
-                CFTypeRef value = CFDictionaryGetValue(power, CFSTR("CurrentPowerState"));
-                if (value && CFGetTypeID(value) == CFNumberGetTypeID()) {
-                    CFNumberGetValue(value, kCFNumberNSIntegerType, &state);
-                }
-            }
-            if (power) CFRelease(power);
-        }
-        IOObjectRelease(service);
-    }
-    IOObjectRelease(iterator);
-    return state;
 }
 
 @interface TouchBarController : NSObject <NSApplicationDelegate, NSTouchBarDelegate>
@@ -126,8 +97,6 @@ static NSInteger backlightPowerState(void) {
     }
     [self installEventMonitors];
     [self applyMode:YES];
-    [NSTimer scheduledTimerWithTimeInterval:5 target:self selector:@selector(periodicCheck:)
-                                  userInfo:nil repeats:YES];
     NSLog(@"TouchBarController running; mode=%ld", (long)self.mode);
 }
 
@@ -238,15 +207,6 @@ static NSInteger backlightPowerState(void) {
 - (void)reapplyAfterWake {
     self.wakeRecoveryPending = NO;
     [self applyMode:YES];
-}
-
-- (void)periodicCheck:(NSTimer *)timer {
-    (void)timer;
-    if (!self.globalMonitor || !self.localMonitor) [self rebuildEventMonitors];
-    if (self.mode == BarModeOff && backlightPowerState() != 0) {
-        NSLog(@"Touch Bar backlight was re-enabled; switching it off again");
-        setBacklight(NO);
-    }
 }
 
 - (NSTouchBarItem *)touchBar:(NSTouchBar *)bar makeItemForIdentifier:(NSTouchBarItemIdentifier)identifier {

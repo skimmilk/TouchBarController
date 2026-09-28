@@ -25,14 +25,14 @@ The app bundle includes its own copy of `touchbarctl`, so it works from any inst
 ./build/touchbarctl on
 ```
 
-These commands control the hardware backlight directly. They do not change the background app's saved mode. If that mode is off, the app may turn the backlight off again within five seconds; use the Command shortcut below to change the persistent mode. `status` reports the Touch Bar backlight driver's power state, not the entire display controller's state.
+These commands control the hardware backlight directly. They do not change the background app's saved mode, which the app restores after wake or a mode change. Use the Command shortcut below to change the persistent mode. `status` reports the Touch Bar backlight driver's power state, not the entire display controller's state.
 
 ## Background controls
 
 - Double-tap **Command** within 0.3 seconds to switch the Touch Bar off or restore the last visible mode.
 - Double-tap **Option** within 0.3 seconds to switch between the normal Touch Bar and F1–F12.
 
-The selected mode survives app restarts. After sleep or lid open, the app turns the backlight off immediately, waits two seconds, and restores that mode. If the mode was off before sleep, it stays off. While off, the app checks every five seconds and turns the backlight off again if macOS re-enables it.
+The selected mode survives app restarts. After sleep or lid open, the app turns the backlight off immediately, waits two seconds, and restores that mode. If the mode was off before sleep, it stays off.
 
 ## Permissions
 

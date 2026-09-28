@@ -22,7 +22,7 @@ $(APP_BINARY): TouchBarController/main.m TouchBarController/GestureDetector.c To
 	mkdir -p $(APP)/Contents/MacOS
 	cp TouchBarController/Info.plist $(APP)/Contents/Info.plist
 	cp $(CLI) $(APP)/Contents/MacOS/touchbarctl
-	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework ApplicationServices -framework Carbon -framework IOKit TouchBarController/main.m TouchBarController/GestureDetector.c -o $@
+	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework ApplicationServices -framework Carbon TouchBarController/main.m TouchBarController/GestureDetector.c -o $@
 	codesign --force --sign - $(APP)
 
 install: all
