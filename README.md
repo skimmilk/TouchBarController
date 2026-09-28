@@ -54,7 +54,13 @@ To start it again:
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.touchbar.controller.plist
 ```
 
-To uninstall, stop the agent, then remove `~/Library/LaunchAgents/com.local.touchbar.controller.plist` and `~/Applications/TouchBarController.app`. If the backlight is off, run `./build/touchbarctl on` first.
+To remove the installation and local build output:
+
+```sh
+make uninstall
+```
+
+This stops the agent, attempts to restore the backlight, removes the app and LaunchAgent, clears its saved mode, attempts to reset its permission entries, and deletes project-specific cache and saved-state files. 
 
 ## How it works
 
