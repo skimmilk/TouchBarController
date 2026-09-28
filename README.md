@@ -1,6 +1,8 @@
 # Touch Bar Controller
 
-Touch Bar Controller is a small macOS background app for a MacBook Pro with a physical Touch Bar. It can leave the bar off, show the normal macOS controls, or show F1–F12 buttons. After every wake, it turns the Touch Bar backlight off for two seconds and then restores the selected mode. A companion `touchbarctl` command provides direct `on`, `off`, and `status` controls.
+Some Touch Bars intermittently flash after a Mac wakes or its lid opens. On the Mac this project was built for, turning the backlight off and then on again stops the flashing. We could not find another app that actually powers off the Touch Bar backlight, so Touch Bar Controller automates that reset after every wake: it turns the backlight off for two seconds, then restores the selected mode.
+
+The background app can also leave the bar off, show the normal macOS controls, or show F1–F12 buttons. A companion `touchbarctl` command provides direct `on`, `off`, and `status` controls.
 
 This project uses undocumented macOS APIs. It has been tested on an Apple Silicon MacBookPro17,1 running macOS 27.0. Other models and macOS versions may behave differently.
 
