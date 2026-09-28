@@ -6,6 +6,10 @@ The background app can also leave the bar off, show the normal macOS controls, o
 
 This project uses undocumented macOS APIs. It has been tested on an Apple Silicon MacBookPro17,1 running macOS 27.0. Other models and macOS versions may behave differently.
 
+## Notes
+
+This was undertaken as an experiment in vibe-coding. Everything was written with GPT-6 Sol, with no human oversight except to verify that it functions. Works On My Machine™
+
 ## Build and install
 
 You need a Mac with a physical Touch Bar and the Xcode Command Line Tools (`xcode-select --install`). From the project directory:
@@ -40,19 +44,7 @@ The shortcuts and F1–F12 key presses need access in **System Settings > Privac
 
 The app and CLI are signed ad hoc when built. Rebuilding can invalidate an existing permission entry, so `make install` resets this app's Accessibility and keyboard event-posting approvals before restarting it. You still need to grant the new build access in System Settings. If a reset reports an error, remove the old Touch Bar Controller entry there manually and restart the app with `launchctl kickstart -k gui/$(id -u)/local.touchbar.controller`.
 
-## Stop or remove
-
-To stop automatic control for this login session:
-
-```sh
-launchctl bootout gui/$(id -u)/local.touchbar.controller
-```
-
-To start it again:
-
-```sh
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.touchbar.controller.plist
-```
+## Remove
 
 To remove the installation and local build output:
 
