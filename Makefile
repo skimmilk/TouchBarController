@@ -39,7 +39,7 @@ install: all
 	rm -rf "$(INSTALL_APP)"
 	ditto "$(APP)" "$(INSTALL_APP)"
 	cp TouchBarController/LaunchAgent.plist "$(AGENT_PLIST)"
-	plutil -replace ProgramArguments.0 -string "$(INSTALLED_BINARY)" "$(AGENT_PLIST)"
+	plutil -insert ProgramArguments.0 -string "$(INSTALLED_BINARY)" "$(AGENT_PLIST)"
 	@tccutil reset Accessibility $(AGENT_LABEL) || echo "Warning: could not reset Accessibility access for $(AGENT_LABEL)" >&2
 	@tccutil reset PostEvent $(AGENT_LABEL) || echo "Warning: could not reset keyboard event-posting access for $(AGENT_LABEL)" >&2
 	launchctl bootstrap gui/$$(id -u) "$(AGENT_PLIST)"

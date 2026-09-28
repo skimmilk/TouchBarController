@@ -3,10 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key><string>local.touchbar.controller</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>REPLACED_BY_MAKE_INSTALL</string>
-    </array>
+    <key>ProgramArguments</key><array/>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>LimitLoadToSessionType</key><string>Aqua</string>
