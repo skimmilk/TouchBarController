@@ -1,11 +1,10 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <Carbon/Carbon.h>
-#import <spawn.h>
-#import <sys/wait.h>
+#import <IOKit/IOMessage.h>
+#import <IOKit/pwr_mgt/IOPMLib.h>
 
-extern char **environ;
-
+#import "../CLI/BacklightControl.h"
 #import "GestureDetector.h"
 
 @interface NSTouchBar (SystemModalPrivate)
@@ -30,20 +29,7 @@ static void setBacklight(BOOL on) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{ queue = dispatch_queue_create("local.touchbar.backlight", DISPATCH_QUEUE_SERIAL); });
     dispatch_async(queue, ^{
-        NSString *tool = [[[[NSBundle mainBundle] executablePath] stringByDeletingLastPathComponent]
-                          stringByAppendingPathComponent:@"touchbarctl"];
-        const char *path = tool.fileSystemRepresentation;
-        pid_t child = 0;
-        char *const arguments[] = {(char *)path, on ? "on" : "off", NULL};
-        int spawnResult = posix_spawn(&child, path, NULL, NULL, arguments, environ);
-        if (spawnResult != 0) {
-            NSLog(@"Could not run touchbarctl: %d", spawnResult);
-            return;
-        }
-        int status = 0;
-        if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            NSLog(@"touchbarctl failed for %@", on ? @"on" : @"off");
-        }
+        if (!TouchBarSetBacklight(on)) NSLog(@"Could not turn Touch Bar backlight %@", on ? @"on" : @"off");
     });
 }
 
@@ -57,8 +43,29 @@ static void setBacklight(BOOL on) {
 @property GestureDetector gestures;
 @property (strong) id globalMonitor;
 @property (strong) id localMonitor;
+@property IONotificationPortRef powerNotificationPort;
+@property io_object_t powerNotifier;
+@property io_connect_t powerConnection;
 - (void)handleKeyboardEvent:(NSEvent *)event;
+- (void)beginWake:(NSString *)source;
 @end
+
+static void powerCallback(void *context, io_service_t service, natural_t messageType, void *messageArgument) {
+    (void)service;
+    TouchBarController *controller = (__bridge TouchBarController *)context;
+    switch (messageType) {
+        case kIOMessageCanSystemSleep:
+        case kIOMessageSystemWillSleep:
+            IOAllowPowerChange(controller.powerConnection, (long)messageArgument);
+            break;
+        case kIOMessageSystemWillPowerOn:
+            [controller beginWake:@"powering on"];
+            break;
+        case kIOMessageSystemHasPoweredOn:
+            [controller beginWake:@"powered on"];
+            break;
+    }
+}
 
 @implementation TouchBarController
 
@@ -86,6 +93,14 @@ static void setBacklight(BOOL on) {
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
+    self.powerConnection = IORegisterForSystemPower((__bridge void *)self, &_powerNotificationPort,
+                                                     powerCallback, &_powerNotifier);
+    if (self.powerConnection) {
+        CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(self.powerNotificationPort),
+                           kCFRunLoopCommonModes);
+    } else {
+        NSLog(@"Could not register for I/O Kit power notifications; using workspace wake notification");
+    }
     [[NSWorkspace sharedWorkspace].notificationCenter addObserver:self
         selector:@selector(didWake:) name:NSWorkspaceDidWakeNotification object:nil];
     [[NSWorkspace sharedWorkspace].notificationCenter addObserver:self
@@ -103,6 +118,13 @@ static void setBacklight(BOOL on) {
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
     [[NSWorkspace sharedWorkspace].notificationCenter removeObserver:self];
+    if (self.powerConnection) {
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(self.powerNotificationPort),
+                              kCFRunLoopCommonModes);
+        IODeregisterForSystemPower(&_powerNotifier);
+        IOServiceClose(self.powerConnection);
+        IONotificationPortDestroy(self.powerNotificationPort);
+    }
     [self removeEventMonitors];
 }
 
@@ -188,13 +210,28 @@ static void setBacklight(BOOL on) {
 
 - (void)didWake:(NSNotification *)notification {
     (void)notification;
-    NSLog(@"Wake notification received");
-    GestureDetectorReset(&_gestures);
+    [self beginWake:@"workspace notification"];
+}
+
+- (void)beginWake:(NSString *)source {
+    NSLog(@"Wake signal: %@", source);
+    BOOL firstSignal = !self.wakeRecoveryPending;
     self.wakeRecoveryPending = YES;
     setBacklight(NO);
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reapplyAfterWake) object:nil];
-    [self performSelector:@selector(rebuildEventMonitors) withObject:nil afterDelay:0.5];
-    [self performSelector:@selector(rebuildEventMonitors) withObject:nil afterDelay:2.0];
+    if (firstSignal) {
+        GestureDetectorReset(&_gestures);
+        // The first power message can precede the Touch Bar HID service becoming ready.
+        const int64_t retryDelaysMs[] = {50, 150, 300, 500};
+        for (size_t i = 0; i < sizeof(retryDelaysMs) / sizeof(retryDelaysMs[0]); i++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, retryDelaysMs[i] * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), ^{
+                if (self.wakeRecoveryPending) setBacklight(NO);
+            });
+        }
+        [self performSelector:@selector(rebuildEventMonitors) withObject:nil afterDelay:0.5];
+        [self performSelector:@selector(rebuildEventMonitors) withObject:nil afterDelay:2.0];
+    }
     [self performSelector:@selector(reapplyAfterWake) withObject:nil afterDelay:2.0];
 }
 

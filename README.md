@@ -1,6 +1,6 @@
 # Touch Bar Controller
 
-Some Touch Bars intermittently flash after a Mac wakes or its lid opens. On the Mac this project was built for, turning the backlight off and then on again stops the flashing. We could not find another app that actually powers off the Touch Bar backlight, so Touch Bar Controller automates that reset after every wake: it turns the backlight off for two seconds, then restores the selected mode.
+Some Touch Bars intermittently flash after a Mac wakes or its lid opens. On the Mac this project was built for, turning the backlight off and then on again stops the flashing. We could not find another app that actually powers off the Touch Bar backlight, so Touch Bar Controller automates that reset after every wake: it requests the backlight off as soon as I/O Kit reports that wake has begun, then restores the selected mode two seconds after the last wake signal.
 
 The background app can also leave the bar off, show the normal macOS controls, or show F1–F12 buttons. A companion `touchbarctl` command provides direct `on`, `off`, and `status` controls.
 
@@ -36,7 +36,7 @@ These commands control the hardware backlight directly. They do not change the b
 - Double-tap **Command** within 0.3 seconds to switch the Touch Bar off or restore the last visible mode.
 - Double-tap **Option** within 0.3 seconds to switch between the normal Touch Bar and F1–F12.
 
-The selected mode survives app restarts. After sleep or lid open, the app turns the backlight off immediately, waits two seconds, and restores that mode. If the mode was off before sleep, it stays off.
+The selected mode survives app restarts. After sleep or lid open, the app requests the backlight off when system power-on begins, retries briefly while the hardware comes online, and repeats the request after power-on and at the workspace wake notification. It restores the selected mode two seconds after the last signal. If the mode was off before sleep, it stays off.
 
 ## Permissions
 
@@ -56,6 +56,6 @@ This stops the agent, attempts to restore the backlight, removes the app and Lau
 
 ## How it works
 
-The CLI calls the private `DFRBrightnessClient` API for the `TouchBarUserDevice` HID service. The background app runs that same CLI from inside its bundle, presents a blank or F1–F12 system-modal Touch Bar when needed, and posts F-key events. Turning the backlight off changes `AppleARMBacklight` under `backlight-dfr` to `CurrentPowerState = 0`; it does not fully power down the Touch Bar display or controller. This behavior is unsupported by Apple and could change with a macOS update.
+The CLI and background app call the private `DFRBrightnessClient` API for the `TouchBarUserDevice` HID service. The background app keeps its brightness client ready in-process, presents a blank or F1–F12 system-modal Touch Bar when needed, and posts F-key events. Turning the backlight off changes `AppleARMBacklight` under `backlight-dfr` to `CurrentPowerState = 0`; it does not fully power down the Touch Bar display or controller. This behavior is unsupported by Apple and could change with a macOS update.
 
 Released under the [MIT License](LICENSE).

@@ -14,16 +14,16 @@ AGENT_LABEL = local.touchbar.controller
 all: $(CLI) $(APP_BINARY)
 app: $(APP_BINARY)
 
-$(CLI): CLI/main.m
+$(CLI): CLI/main.m CLI/BacklightControl.m CLI/BacklightControl.h
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -framework Foundation -framework IOKit $< -o $@
+	$(CC) $(CFLAGS) -fblocks -framework Foundation -framework IOKit CLI/main.m CLI/BacklightControl.m -o $@
 	codesign --force --sign - $@
 
-$(APP_BINARY): TouchBarController/main.m TouchBarController/GestureDetector.c TouchBarController/GestureDetector.h TouchBarController/Info.plist $(CLI)
+$(APP_BINARY): TouchBarController/main.m TouchBarController/GestureDetector.c TouchBarController/GestureDetector.h TouchBarController/Info.plist CLI/BacklightControl.m CLI/BacklightControl.h $(CLI)
 	mkdir -p $(APP)/Contents/MacOS
 	cp TouchBarController/Info.plist $(APP)/Contents/Info.plist
 	cp $(CLI) $(APP)/Contents/MacOS/touchbarctl
-	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework ApplicationServices -framework Carbon TouchBarController/main.m TouchBarController/GestureDetector.c -o $@
+	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework ApplicationServices -framework Carbon -framework IOKit TouchBarController/main.m TouchBarController/GestureDetector.c CLI/BacklightControl.m -o $@
 	codesign --force --sign - $(APP)
 
 install: all

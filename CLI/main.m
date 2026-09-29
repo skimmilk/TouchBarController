@@ -1,11 +1,9 @@
 #import <Foundation/Foundation.h>
 #import <IOKit/IOKitLib.h>
-#import <IOKit/hidsystem/IOHIDEventSystemClient.h>
-#import <IOKit/hidsystem/IOHIDServiceClient.h>
-#import <dlfcn.h>
-#import <objc/message.h>
 #import <stdio.h>
 #import <string.h>
+
+#import "BacklightControl.h"
 
 static int backlightPowerState(void) {
     io_iterator_t iterator = IO_OBJECT_NULL;
@@ -35,40 +33,6 @@ static int backlightPowerState(void) {
     return state;
 }
 
-static BOOL setBacklight(BOOL on) {
-    void *framework = dlopen("/System/Library/PrivateFrameworks/DFRBrightness.framework/DFRBrightness", RTLD_LAZY);
-    if (!framework) return NO;
-    Class cls = objc_getClass("DFRBrightnessClient");
-    if (!cls) return NO;
-    IOHIDEventSystemClientRef system = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault);
-    CFArrayRef services = system ? IOHIDEventSystemClientCopyServices(system) : NULL;
-    if (!services) {
-        if (system) CFRelease(system);
-        return NO;
-    }
-    id client = ((id (*)(id, SEL))objc_msgSend)(cls, @selector(new));
-    BOOL result = NO;
-    if (((BOOL (*)(id, SEL))objc_msgSend)(client, sel_registerName("initializeHID"))) {
-        for (CFIndex i = 0; i < CFArrayGetCount(services); i++) {
-            IOHIDServiceClientRef service = (IOHIDServiceClientRef)CFArrayGetValueAtIndex(services, i);
-            CFTypeRef product = IOHIDServiceClientCopyProperty(service, CFSTR("Product"));
-            BOOL isTouchBar = product && [(__bridge NSString *)product isEqualToString:@"TouchBarUserDevice"];
-            if (product) CFRelease(product);
-            if (!isTouchBar) continue;
-            BOOL added = ((BOOL (*)(id, SEL, IOHIDServiceClientRef))objc_msgSend)(client, sel_registerName("addDFRService:"), service);
-            int displayID = ((int (*)(id, SEL))objc_msgSend)(client, sel_registerName("getDFRDisplayID"));
-            if (added && displayID >= 0) {
-                SEL action = sel_registerName(on ? "turnOn" : "turnOff");
-                result = ((BOOL (*)(id, SEL))objc_msgSend)(client, action);
-            }
-            break;
-        }
-    }
-    CFRelease(services);
-    CFRelease(system);
-    return result;
-}
-
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc != 2 || (strcmp(argv[1], "on") != 0 && strcmp(argv[1], "off") != 0 && strcmp(argv[1], "status") != 0)) {
@@ -85,7 +49,7 @@ int main(int argc, const char *argv[]) {
             return 0;
         }
         BOOL on = strcmp(argv[1], "on") == 0;
-        if (!setBacklight(on)) {
+        if (!TouchBarSetBacklight(on)) {
             fprintf(stderr, "Could not turn the Touch Bar backlight %s\n", on ? "on" : "off");
             return 1;
         }
