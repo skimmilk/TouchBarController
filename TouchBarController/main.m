@@ -3,6 +3,7 @@
 #import <Carbon/Carbon.h>
 #import <IOKit/IOMessage.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
+#import <time.h>
 
 #import "../CLI/BacklightControl.h"
 #import "GestureDetector.h"
@@ -23,14 +24,51 @@ typedef NS_ENUM(NSInteger, BarMode) {
 static NSString *const kModeKey = @"TouchBarMode";
 static NSString *const kPriorModeKey = @"PriorVisibleTouchBarMode";
 static NSString *const kTrayIdentifier = @"local.touchbar.controller.tray";
+// Only accessed on the serial backlight queue.
+static uint64_t loggedWakeCycle;
 
-static void setBacklight(BOOL on) {
+static double monotonicTimeMs(void) {
+    struct timespec time;
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    return time.tv_sec * 1000.0 + time.tv_nsec / 1000000.0;
+}
+
+static dispatch_queue_t backlightQueue(void) {
     static dispatch_queue_t queue;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ queue = dispatch_queue_create("local.touchbar.backlight", DISPATCH_QUEUE_SERIAL); });
-    dispatch_async(queue, ^{
-        if (!TouchBarSetBacklight(on)) NSLog(@"Could not turn Touch Bar backlight %@", on ? @"on" : @"off");
+    return queue;
+}
+
+static void performBacklight(BOOL on, uint64_t wakeCycle, double wakeStartMs) {
+    BOOL succeeded = TouchBarSetBacklight(on);
+    if (wakeCycle) {
+        if (succeeded && loggedWakeCycle != wakeCycle) {
+            loggedWakeCycle = wakeCycle;
+            NSLog(@"wake_off_delay_ms=%.3f wake_cycle=%llu",
+                  monotonicTimeMs() - wakeStartMs, (unsigned long long)wakeCycle);
+        }
+    } else if (!succeeded) {
+        NSLog(@"Could not turn Touch Bar backlight %@", on ? @"on" : @"off");
+    }
+}
+
+static void requestBacklight(BOOL on, uint64_t wakeCycle, double wakeStartMs) {
+    dispatch_async(backlightQueue(), ^{
+        performBacklight(on, wakeCycle, wakeStartMs);
     });
+}
+
+static void finishWakeMeasurement(uint64_t wakeCycle) {
+    dispatch_async(backlightQueue(), ^{
+        if (loggedWakeCycle != wakeCycle) {
+            NSLog(@"wake_off_delay_ms=unavailable wake_cycle=%llu", (unsigned long long)wakeCycle);
+        }
+    });
+}
+
+static void setBacklight(BOOL on) {
+    requestBacklight(on, 0, 0);
 }
 
 @interface TouchBarController : NSObject <NSApplicationDelegate, NSTouchBarDelegate>
@@ -40,6 +78,9 @@ static void setBacklight(BOOL on) {
 @property BarMode mode;
 @property BarMode priorVisibleMode;
 @property BOOL wakeRecoveryPending;
+@property uint64_t wakeCycle;
+@property double wakeStartMs;
+@property (strong) dispatch_source_t wakeRetryTimer;
 @property GestureDetector gestures;
 @property (strong) id globalMonitor;
 @property (strong) id localMonitor;
@@ -214,21 +255,37 @@ static void powerCallback(void *context, io_service_t service, natural_t message
 }
 
 - (void)beginWake:(NSString *)source {
-    NSLog(@"Wake signal: %@", source);
     BOOL firstSignal = !self.wakeRecoveryPending;
+    if (firstSignal) {
+        self.wakeCycle++;
+        self.wakeStartMs = monotonicTimeMs();
+    }
+    NSLog(@"Wake signal: %@; wake_cycle=%llu", source, (unsigned long long)self.wakeCycle);
     self.wakeRecoveryPending = YES;
-    setBacklight(NO);
+    requestBacklight(NO, self.wakeCycle, self.wakeStartMs);
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reapplyAfterWake) object:nil];
     if (firstSignal) {
         GestureDetectorReset(&_gestures);
         // The first power message can precede the Touch Bar HID service becoming ready.
-        const int64_t retryDelaysMs[] = {50, 150, 300, 500};
-        for (size_t i = 0; i < sizeof(retryDelaysMs) / sizeof(retryDelaysMs[0]); i++) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, retryDelaysMs[i] * NSEC_PER_MSEC),
-                           dispatch_get_main_queue(), ^{
-                if (self.wakeRecoveryPending) setBacklight(NO);
-            });
-        }
+        uint64_t wakeCycle = self.wakeCycle;
+        double wakeStartMs = self.wakeStartMs;
+        dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, backlightQueue());
+        self.wakeRetryTimer = timer;
+        dispatch_source_set_timer(timer,
+                                  dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC),
+                                  10 * NSEC_PER_MSEC, 1 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(timer, ^{
+            if (monotonicTimeMs() - wakeStartMs <= 500.0) {
+                performBacklight(NO, wakeCycle, wakeStartMs);
+            }
+        });
+        dispatch_resume(timer);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            if (self.wakeRetryTimer == timer) {
+                dispatch_source_cancel(timer);
+                self.wakeRetryTimer = nil;
+            }
+        });
         [self performSelector:@selector(rebuildEventMonitors) withObject:nil afterDelay:0.5];
         [self performSelector:@selector(rebuildEventMonitors) withObject:nil afterDelay:2.0];
     }
@@ -242,6 +299,11 @@ static void powerCallback(void *context, io_service_t service, natural_t message
 }
 
 - (void)reapplyAfterWake {
+    if (self.wakeRetryTimer) {
+        dispatch_source_cancel(self.wakeRetryTimer);
+        self.wakeRetryTimer = nil;
+    }
+    finishWakeMeasurement(self.wakeCycle);
     self.wakeRecoveryPending = NO;
     [self applyMode:YES];
 }

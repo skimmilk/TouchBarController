@@ -36,7 +36,13 @@ These commands control the hardware backlight directly. They do not change the b
 - Double-tap **Command** within 0.3 seconds to switch the Touch Bar off or restore the last visible mode.
 - Double-tap **Option** within 0.3 seconds to switch between the normal Touch Bar and F1–F12.
 
-The selected mode survives app restarts. After sleep or lid open, the app requests the backlight off when system power-on begins, retries briefly while the hardware comes online, and repeats the request after power-on and at the workspace wake notification. It restores the selected mode two seconds after the last signal. If the mode was off before sleep, it stays off.
+The selected mode survives app restarts. After sleep or lid open, the app requests the backlight off when system power-on begins, retries every 10 ms for about 500 ms while the hardware comes online, and repeats the request after power-on and at the workspace wake notification. It restores the selected mode two seconds after the last signal. If the mode was off before sleep, it stays off.
+
+For each wake, the app logs `wake_off_delay_ms=<number>` when the first backlight-off call succeeds, measured from the first wake signal with a monotonic clock. If no call succeeds before the selected mode is restored, it logs `wake_off_delay_ms=unavailable`. The number measures the API call's successful completion, not a physical display measurement. To average the recorded successful calls from the past seven days:
+
+```sh
+log show --last 7d --style compact --predicate 'process == "TouchBarController" AND eventMessage CONTAINS "wake_off_delay_ms="' | sed -nE 's/.*wake_off_delay_ms=([0-9.]+).*/\1/p' | awk '{ sum += $1; count++ } END { if (count) printf "%.3f ms across %d wakes\n", sum / count, count; else print "No successful wake samples" }'
+```
 
 ## Permissions
 
