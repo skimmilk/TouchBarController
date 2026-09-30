@@ -10,9 +10,21 @@ INSTALLED_CLI = $(INSTALL_APP)/Contents/MacOS/touchbarctl
 AGENT_PLIST = $(HOME)/Library/LaunchAgents/com.local.touchbar.controller.plist
 AGENT_LABEL = local.touchbar.controller
 
-.PHONY: all app install uninstall clean
+.PHONY: all app install uninstall clean test
 all: $(CLI) $(APP_BINARY)
 app: $(APP_BINARY)
+
+test: $(BUILD_DIR)/wake-recovery-tests $(BUILD_DIR)/brightness-restoration-tests
+	./$(BUILD_DIR)/wake-recovery-tests
+	./$(BUILD_DIR)/brightness-restoration-tests
+
+$(BUILD_DIR)/brightness-restoration-tests: Tests/BrightnessRestorationTests.m CLI/BacklightControl.m CLI/BacklightControl.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -fblocks -framework Foundation -framework IOKit Tests/BrightnessRestorationTests.m -o $@
+
+$(BUILD_DIR)/wake-recovery-tests: Tests/WakeRecoveryTests.m TouchBarController/main.m TouchBarController/GestureDetector.c TouchBarController/GestureDetector.h CLI/BacklightControl.h
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework Carbon -framework IOKit Tests/WakeRecoveryTests.m TouchBarController/GestureDetector.c -o $@
 
 $(CLI): CLI/main.m CLI/BacklightControl.m CLI/BacklightControl.h
 	mkdir -p $(BUILD_DIR)

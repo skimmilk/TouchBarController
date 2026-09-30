@@ -4,8 +4,76 @@
 #import <IOKit/hidsystem/IOHIDServiceClient.h>
 #import <dlfcn.h>
 #import <objc/message.h>
+#import <math.h>
 
 static id brightnessClient;
+static id systemBrightnessClient;
+static NSNumber *savedBrightness;
+static BOOL backlightSuppressed;
+static BOOL brightnessRestorePending;
+static CFStringRef const brightnessPreferences = CFSTR("local.touchbar.controller");
+static CFStringRef const brightnessPreferenceKey = CFSTR("SavedTouchBarBrightness");
+
+static id coreBrightnessClient(void) {
+    if (systemBrightnessClient) return systemBrightnessClient;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        if (dlopen("/System/Library/PrivateFrameworks/CoreBrightness.framework/CoreBrightness", RTLD_LAZY)) {
+            Class cls = objc_getClass("BrightnessSystemClient");
+            if (cls) systemBrightnessClient = ((id (*)(id, SEL))objc_msgSend)(cls, @selector(new));
+        }
+    });
+    return systemBrightnessClient;
+}
+
+static BOOL validBrightness(id value) {
+    return [value isKindOfClass:[NSNumber class]] && isfinite([value doubleValue]) &&
+        [value doubleValue] >= 0.0 && [value doubleValue] <= 1.0;
+}
+
+static NSInteger currentDisplayState(void) {
+    // displayState returns a cached default in a freshly created client, even
+    // when the service is off. Read the service property for CLI invocations.
+    SEL get = sel_registerName("copyPropertyForKey:");
+    if (![brightnessClient respondsToSelector:get]) return -1;
+    id value = ((id (*)(id, SEL, id))objc_msgSend)(brightnessClient, get, @"DFRDisplayState");
+    return [value isKindOfClass:[NSNumber class]] ? [value integerValue] : -1;
+}
+
+static void rememberBrightness(void) {
+    // Retries must not replace the saved level with the off state's zero.
+    if (backlightSuppressed || brightnessRestorePending) return;
+    if (!savedBrightness) {
+        id value = CFBridgingRelease(CFPreferencesCopyAppValue(brightnessPreferenceKey, brightnessPreferences));
+        if (validBrightness(value)) savedBrightness = value;
+    }
+    if (currentDisplayState() != 2) return;
+    id client = coreBrightnessClient();
+    SEL get = sel_registerName("copyPropertyForKey:andDisplay:");
+    if (![client respondsToSelector:get]) return;
+    int displayID = ((int (*)(id, SEL))objc_msgSend)(brightnessClient, sel_registerName("getDFRDisplayID"));
+    id properties = ((id (*)(id, SEL, id, uint64_t))objc_msgSend)(client, get, @"DisplayBrightness", displayID);
+    id value = [properties isKindOfClass:[NSDictionary class]] ? properties[@"Brightness"] : nil;
+    if (!validBrightness(value)) return;
+    savedBrightness = value;
+    CFPreferencesSetAppValue(brightnessPreferenceKey, (__bridge CFPropertyListRef)value, brightnessPreferences);
+    CFPreferencesAppSynchronize(brightnessPreferences);
+}
+
+BOOL TouchBarRestoreBrightness(void) {
+    if (!brightnessRestorePending) return YES;
+    if (currentDisplayState() != 2) return NO;
+    id client = coreBrightnessClient();
+    SEL set = sel_registerName("setProperty:withKey:andDisplay:");
+    if (!savedBrightness || ![client respondsToSelector:set]) return NO;
+    int displayID = ((int (*)(id, SEL))objc_msgSend)(brightnessClient, sel_registerName("getDFRDisplayID"));
+    // Transient commit preserves ambient-light policy instead of saving a new
+    // user brightness preference. macOS resumes its own brightness adjustments.
+    NSDictionary *properties = @{@"Brightness": savedBrightness, @"Commit": @NO, @"CommitType": @0};
+    BOOL success = ((BOOL (*)(id, SEL, id, id, uint64_t))objc_msgSend)(client, set, properties, @"DisplayBrightness", displayID);
+    if (success) brightnessRestorePending = NO;
+    return success;
+}
 
 static id createBrightnessClient(void) {
     static dispatch_once_t once;
@@ -48,10 +116,38 @@ BOOL TouchBarSetBacklight(BOOL on) {
     if (!brightnessClient) brightnessClient = createBrightnessClient();
     if (!brightnessClient) return NO;
 
-    SEL action = sel_registerName(on ? "turnOn" : "turnOff");
-    if (((BOOL (*)(id, SEL))objc_msgSend)(brightnessClient, action)) return YES;
+    if (!on) {
+        rememberBrightness();
+        backlightSuppressed = YES;
+        brightnessRestorePending = NO;
+    } else {
+        // A separately invoked CLI can load the snapshot saved by off/the app.
+        if (!savedBrightness) {
+            id value = CFBridgingRelease(CFPreferencesCopyAppValue(brightnessPreferenceKey, brightnessPreferences));
+            if (validBrightness(value)) savedBrightness = value;
+        }
+        NSInteger state = currentDisplayState();
+        BOOL wasOff = state >= 0 && state != 2;
+        if (savedBrightness && (backlightSuppressed || wasOff)) brightnessRestorePending = YES;
+    }
+
+    // turnOff uses a 0.5-second fade on the tested macOS build. Retrying that
+    // method during wake is not an immediate off request.
+    // Keep the original turnOn fade; restore its brightness separately afterward.
+    SEL action = sel_registerName(on ? "turnOn" : "turnOffWithPeriod:");
+    if (![brightnessClient respondsToSelector:action]) return NO;
+    BOOL success = on ? ((BOOL (*)(id, SEL))objc_msgSend)(brightnessClient, action)
+        : ((BOOL (*)(id, SEL, float))objc_msgSend)(brightnessClient, action, 0.0f);
+    if (success) {
+        if (on) backlightSuppressed = NO;
+        return YES;
+    }
 
     // A client created before sleep may hold an invalid HID service after wake.
     brightnessClient = createBrightnessClient();
-    return brightnessClient && ((BOOL (*)(id, SEL))objc_msgSend)(brightnessClient, action);
+    if (!brightnessClient || ![brightnessClient respondsToSelector:action]) return NO;
+    success = on ? ((BOOL (*)(id, SEL))objc_msgSend)(brightnessClient, action)
+        : ((BOOL (*)(id, SEL, float))objc_msgSend)(brightnessClient, action, 0.0f);
+    if (success && on) backlightSuppressed = NO;
+    return success;
 }

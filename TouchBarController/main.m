@@ -3,6 +3,7 @@
 #import <IOKit/IOMessage.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #import <time.h>
+#import <stdatomic.h>
 
 #import "../CLI/BacklightControl.h"
 #import "GestureDetector.h"
@@ -28,6 +29,8 @@ static NSString *const kFunctionKeysSystemMode = @"functionKeys";
 static NSString *const kTrayIdentifier = @"local.touchbar.controller.tray";
 // Only accessed on the serial backlight queue.
 static uint64_t loggedWakeCycle;
+// Main-thread decisions invalidate already queued requests and retry handlers.
+static atomic_uint_fast64_t backlightGeneration;
 
 static double monotonicTimeMs(void) {
     struct timespec time;
@@ -43,7 +46,15 @@ static dispatch_queue_t backlightQueue(void) {
 }
 
 static void performBacklight(BOOL on, uint64_t wakeCycle, double wakeStartMs) {
+    uint64_t generation = atomic_load(&backlightGeneration);
     BOOL succeeded = TouchBarSetBacklight(on);
+    if (on && succeeded) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 700 * NSEC_PER_MSEC), backlightQueue(), ^{
+            if (atomic_load(&backlightGeneration) == generation && !TouchBarRestoreBrightness()) {
+                NSLog(@"Could not restore Touch Bar brightness");
+            }
+        });
+    }
     if (wakeCycle) {
         if (succeeded && loggedWakeCycle != wakeCycle) {
             loggedWakeCycle = wakeCycle;
@@ -55,10 +66,14 @@ static void performBacklight(BOOL on, uint64_t wakeCycle, double wakeStartMs) {
     }
 }
 
-static void requestBacklight(BOOL on, uint64_t wakeCycle, double wakeStartMs) {
+static uint64_t requestBacklight(BOOL on, uint64_t wakeCycle, double wakeStartMs) {
+    uint64_t generation = atomic_fetch_add(&backlightGeneration, 1) + 1;
     dispatch_async(backlightQueue(), ^{
-        performBacklight(on, wakeCycle, wakeStartMs);
+        if (atomic_load(&backlightGeneration) == generation) {
+            performBacklight(on, wakeCycle, wakeStartMs);
+        }
     });
+    return generation;
 }
 
 static void finishWakeMeasurement(uint64_t wakeCycle) {
@@ -106,6 +121,7 @@ static BOOL setSystemPresentationMode(NSString *mode) {
 @property BarMode priorVisibleMode;
 @property BOOL fnHeld;
 @property BOOL wakeRecoveryPending;
+@property BOOL sleeping;
 @property uint64_t wakeCycle;
 @property double wakeStartMs;
 @property (strong) dispatch_source_t wakeRetryTimer;
@@ -117,6 +133,7 @@ static BOOL setSystemPresentationMode(NSString *mode) {
 @property io_connect_t powerConnection;
 - (void)handleKeyboardEvent:(NSEvent *)event;
 - (void)beginWake:(NSString *)source;
+- (void)prepareForSleep;
 - (void)restoreSystemPresentationMode;
 @end
 
@@ -125,7 +142,10 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     TouchBarController *controller = (__bridge TouchBarController *)context;
     switch (messageType) {
         case kIOMessageCanSystemSleep:
+            IOAllowPowerChange(controller.powerConnection, (long)messageArgument);
+            break;
         case kIOMessageSystemWillSleep:
+            [controller prepareForSleep];
             IOAllowPowerChange(controller.powerConnection, (long)messageArgument);
             break;
         case kIOMessageSystemWillPowerOn:
@@ -167,6 +187,8 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     [[NSWorkspace sharedWorkspace].notificationCenter addObserver:self
         selector:@selector(didWake:) name:NSWorkspaceDidWakeNotification object:nil];
     [[NSWorkspace sharedWorkspace].notificationCenter addObserver:self
+        selector:@selector(willSleep:) name:NSWorkspaceWillSleepNotification object:nil];
+    [[NSWorkspace sharedWorkspace].notificationCenter addObserver:self
         selector:@selector(sessionBecameActive:) name:NSWorkspaceSessionDidBecomeActiveNotification object:nil];
     [self installEventMonitors];
     [self applyMode:YES];
@@ -175,6 +197,9 @@ static void powerCallback(void *context, io_service_t service, natural_t message
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self];
+    if (self.wakeRetryTimer) dispatch_source_cancel(self.wakeRetryTimer);
+    atomic_fetch_add(&backlightGeneration, 1);
     [self restoreSystemPresentationMode];
     [[NSWorkspace sharedWorkspace].notificationCenter removeObserver:self];
     if (self.powerConnection) {
@@ -252,6 +277,12 @@ static void powerCallback(void *context, io_service_t service, natural_t message
 }
 
 - (void)applyMode:(BOOL)force {
+    // Shortcuts (including Fn) may change the saved mode during recovery, but
+    // must not interrupt the off interval or enqueue a stale on request.
+    if (self.sleeping || self.wakeRecoveryPending) {
+        [self saveMode];
+        return;
+    }
     BarMode displayedMode = self.mode == BarModeOff && self.fnHeld
         ? self.priorVisibleMode : self.mode;
     if (self.mode == BarModeFunctions) [self showSystemFunctionKeys];
@@ -300,7 +331,27 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     [self beginWake:@"workspace notification"];
 }
 
+- (void)willSleep:(NSNotification *)notification {
+    (void)notification;
+    [self prepareForSleep];
+}
+
+- (void)prepareForSleep {
+    self.sleeping = YES;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self];
+    if (self.wakeRetryTimer) {
+        dispatch_source_cancel(self.wakeRetryTimer);
+        self.wakeRetryTimer = nil;
+    }
+    if (self.wakeRecoveryPending) finishWakeMeasurement(self.wakeCycle);
+    self.wakeRecoveryPending = NO;
+    self.fnHeld = NO;
+    GestureDetectorReset(&_gestures);
+    setBacklight(NO);
+}
+
 - (void)beginWake:(NSString *)source {
+    self.sleeping = NO;
     BOOL firstSignal = !self.wakeRecoveryPending;
     if (firstSignal) {
         self.wakeCycle++;
@@ -308,31 +359,35 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     }
     NSLog(@"Wake signal: %@; wake_cycle=%llu", source, (unsigned long long)self.wakeCycle);
     self.wakeRecoveryPending = YES;
-    requestBacklight(NO, self.wakeCycle, self.wakeStartMs);
+    uint64_t generation = requestBacklight(NO, self.wakeCycle, self.wakeStartMs);
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reapplyAfterWake) object:nil];
+    if (self.wakeRetryTimer) dispatch_source_cancel(self.wakeRetryTimer);
+    // Keep enforcing off until restoration, including later driver wake writes.
+    // The generation check prevents cancelled handlers running after mode-on.
+    uint64_t wakeCycle = self.wakeCycle;
+    double wakeStartMs = self.wakeStartMs;
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, backlightQueue());
+    self.wakeRetryTimer = timer;
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC),
+                              10 * NSEC_PER_MSEC, 1 * NSEC_PER_MSEC);
+    __weak dispatch_source_t weakTimer = timer;
+    dispatch_source_set_event_handler(timer, ^{
+        dispatch_source_t activeTimer = weakTimer;
+        if (activeTimer && !dispatch_source_testcancel(activeTimer) &&
+            atomic_load(&backlightGeneration) == generation) {
+            performBacklight(NO, wakeCycle, wakeStartMs);
+            if (monotonicTimeMs() - wakeStartMs > 500.0) {
+                dispatch_source_set_timer(activeTimer,
+                                          dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC),
+                                          50 * NSEC_PER_MSEC, 5 * NSEC_PER_MSEC);
+            }
+        }
+    });
+    dispatch_resume(timer);
     if (firstSignal) {
         self.fnHeld = NO;
         GestureDetectorReset(&_gestures);
-        // The first power message can precede the Touch Bar HID service becoming ready.
-        uint64_t wakeCycle = self.wakeCycle;
-        double wakeStartMs = self.wakeStartMs;
-        dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, backlightQueue());
-        self.wakeRetryTimer = timer;
-        dispatch_source_set_timer(timer,
-                                  dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC),
-                                  10 * NSEC_PER_MSEC, 1 * NSEC_PER_MSEC);
-        dispatch_source_set_event_handler(timer, ^{
-            if (monotonicTimeMs() - wakeStartMs <= 500.0) {
-                performBacklight(NO, wakeCycle, wakeStartMs);
-            }
-        });
-        dispatch_resume(timer);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-            if (self.wakeRetryTimer == timer) {
-                dispatch_source_cancel(timer);
-                self.wakeRetryTimer = nil;
-            }
-        });
         [self performSelector:@selector(rebuildEventMonitors) withObject:nil afterDelay:0.5];
         [self performSelector:@selector(rebuildEventMonitors) withObject:nil afterDelay:2.0];
     }
