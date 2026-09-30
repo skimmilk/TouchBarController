@@ -23,7 +23,7 @@ $(APP_BINARY): TouchBarController/main.m TouchBarController/GestureDetector.c To
 	mkdir -p $(APP)/Contents/MacOS
 	cp TouchBarController/Info.plist $(APP)/Contents/Info.plist
 	cp $(CLI) $(APP)/Contents/MacOS/touchbarctl
-	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework ApplicationServices -framework Carbon -framework IOKit TouchBarController/main.m TouchBarController/GestureDetector.c CLI/BacklightControl.m -o $@
+	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework Carbon -framework IOKit TouchBarController/main.m TouchBarController/GestureDetector.c CLI/BacklightControl.m -o $@
 	codesign --force --sign - $(APP)
 
 install: all
@@ -41,7 +41,6 @@ install: all
 	ditto "$(APP)" "$(INSTALL_APP)"
 	cp TouchBarController/LaunchAgent.plist "$(AGENT_PLIST)"
 	plutil -insert ProgramArguments.0 -string "$(INSTALLED_BINARY)" "$(AGENT_PLIST)"
-	@tccutil reset Accessibility $(AGENT_LABEL) || echo "Warning: could not reset Accessibility access for $(AGENT_LABEL)" >&2
 	launchctl bootstrap gui/$$(id -u) "$(AGENT_PLIST)"
 
 uninstall:

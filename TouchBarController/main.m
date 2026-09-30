@@ -1,5 +1,4 @@
 #import <AppKit/AppKit.h>
-#import <ApplicationServices/ApplicationServices.h>
 #import <Carbon/Carbon.h>
 #import <IOKit/IOMessage.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
@@ -169,11 +168,6 @@ static void powerCallback(void *context, io_service_t service, natural_t message
         selector:@selector(didWake:) name:NSWorkspaceDidWakeNotification object:nil];
     [[NSWorkspace sharedWorkspace].notificationCenter addObserver:self
         selector:@selector(sessionBecameActive:) name:NSWorkspaceSessionDidBecomeActiveNotification object:nil];
-    if (!AXIsProcessTrusted()) {
-        NSDictionary *options = @{(__bridge NSString *)kAXTrustedCheckOptionPrompt: @YES};
-        AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
-        NSLog(@"Accessibility access is needed for keyboard shortcuts");
-    }
     [self installEventMonitors];
     [self applyMode:YES];
     NSLog(@"TouchBarController running; mode=%ld", (long)self.mode);

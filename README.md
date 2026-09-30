@@ -19,7 +19,7 @@ make
 make install
 ```
 
-`make` builds `build/touchbarctl` and `build/TouchBarController.app`. `make install` stops the running app, replaces it in `~/Applications`, clears this app's old Accessibility approval, installs a per-user LaunchAgent, and starts it. The app runs without a Dock icon and starts again at login. No `sudo` or SIP change is needed. On a fresh install, the selected mode is the normal macOS Touch Bar.
+`make` builds `build/touchbarctl` and `build/TouchBarController.app`. `make install` stops the running app, replaces it in `~/Applications`, installs a per-user LaunchAgent, and starts it. The app runs without a Dock icon and starts again at login. No `sudo` or SIP change is needed. On a fresh install, the selected mode is the normal macOS Touch Bar.
 
 The app bundle includes its own copy of `touchbarctl`, so it works from any install path. The CLI in `build/` is available for manual use:
 
@@ -47,9 +47,9 @@ log show --last 7d --style compact --predicate 'process == "TouchBarController" 
 
 ## Permissions
 
-The shortcuts need access in **System Settings > Privacy & Security > Device Control and Data Access** on macOS 27. On older macOS versions, look under **Accessibility**. The CLI's backlight command may also request device-control access. macOS handles F1–F12 key presses in function mode.
+On the Mac used for testing, the app's shortcuts, backlight controls, and function-key mode work without granting **Device Control and Data Access**. The app does not request Accessibility access at startup. If shortcuts fail on another macOS setup, check its keyboard-monitoring permissions in System Settings. macOS handles F1–F12 key presses in function mode.
 
-The app and CLI are signed ad hoc when built. Rebuilding can invalidate an existing permission entry, so `make install` resets this app's Accessibility approval before restarting it. You still need to grant the new build access in System Settings. If a reset reports an error, remove the old Touch Bar Controller entry there manually and restart the app with `launchctl kickstart -k gui/$(id -u)/local.touchbar.controller`.
+The app and CLI are signed ad hoc when built. Installing a new build does not reset privacy approvals.
 
 ## Remove
 
