@@ -42,7 +42,6 @@ install: all
 	cp TouchBarController/LaunchAgent.plist "$(AGENT_PLIST)"
 	plutil -insert ProgramArguments.0 -string "$(INSTALLED_BINARY)" "$(AGENT_PLIST)"
 	@tccutil reset Accessibility $(AGENT_LABEL) || echo "Warning: could not reset Accessibility access for $(AGENT_LABEL)" >&2
-	@tccutil reset PostEvent $(AGENT_LABEL) || echo "Warning: could not reset keyboard event-posting access for $(AGENT_LABEL)" >&2
 	launchctl bootstrap gui/$$(id -u) "$(AGENT_PLIST)"
 
 uninstall:
@@ -55,6 +54,13 @@ uninstall:
 		sleep 1; \
 	done; \
 	echo "Touch Bar Controller did not exit; uninstall stopped" >&2; exit 1
+	@previous=$$(defaults read $(AGENT_LABEL) SavedSystemPresentationModeGlobal 2>/dev/null) || previous=; \
+		current=$$(defaults read com.apple.touchbar.agent PresentationModeGlobal 2>/dev/null) || current=; \
+		if [ -n "$$previous" ] && [ "$$current" = functionKeys ] && [ "$$previous" != "$$current" ]; then \
+			if [ "$$previous" = __unset__ ]; then defaults delete com.apple.touchbar.agent PresentationModeGlobal; \
+			else defaults write com.apple.touchbar.agent PresentationModeGlobal -string "$$previous"; fi; \
+			killall ControlStrip 2>/dev/null || true; \
+		fi
 	@if [ -x "$(INSTALLED_CLI)" ]; then "$(INSTALLED_CLI)" on || echo "Warning: could not restore Touch Bar backlight" >&2; \
 	elif [ -x "$(CLI)" ]; then "$(CLI)" on || echo "Warning: could not restore Touch Bar backlight" >&2; \
 	else echo "Warning: touchbarctl is unavailable; could not restore Touch Bar backlight" >&2; fi

@@ -23,6 +23,9 @@ typedef NS_ENUM(NSInteger, BarMode) {
 
 static NSString *const kModeKey = @"TouchBarMode";
 static NSString *const kPriorModeKey = @"PriorVisibleTouchBarMode";
+static NSString *const kSavedSystemModeKey = @"SavedSystemPresentationModeGlobal";
+static NSString *const kUnsetSystemMode = @"__unset__";
+static NSString *const kFunctionKeysSystemMode = @"functionKeys";
 static NSString *const kTrayIdentifier = @"local.touchbar.controller.tray";
 // Only accessed on the serial backlight queue.
 static uint64_t loggedWakeCycle;
@@ -71,9 +74,34 @@ static void setBacklight(BOOL on) {
     requestBacklight(on, 0, 0);
 }
 
-@interface TouchBarController : NSObject <NSApplicationDelegate, NSTouchBarDelegate>
+static NSString *systemPresentationMode(void) {
+    CFPreferencesAppSynchronize(CFSTR("com.apple.touchbar.agent"));
+    id value = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PresentationModeGlobal"),
+                                                           CFSTR("com.apple.touchbar.agent")));
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+static BOOL setSystemPresentationMode(NSString *mode) {
+    CFPreferencesSetAppValue(CFSTR("PresentationModeGlobal"), (__bridge CFPropertyListRef)mode,
+                             CFSTR("com.apple.touchbar.agent"));
+    if (!CFPreferencesAppSynchronize(CFSTR("com.apple.touchbar.agent"))) {
+        NSLog(@"Could not save the macOS Touch Bar presentation mode");
+        return NO;
+    }
+    NSTask *task = [NSTask new];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/killall"];
+    task.arguments = @[@"ControlStrip"];
+    NSError *error = nil;
+    if (![task launchAndReturnError:&error]) {
+        NSLog(@"Could not refresh the macOS Touch Bar presentation mode: %@", error);
+    } else {
+        [task waitUntilExit];
+    }
+    return YES;
+}
+
+@interface TouchBarController : NSObject <NSApplicationDelegate>
 @property (strong) NSTouchBar *blankBar;
-@property (strong) NSTouchBar *functionBar;
 @property (strong) NSTouchBar *currentBar;
 @property BarMode mode;
 @property BarMode priorVisibleMode;
@@ -90,6 +118,7 @@ static void setBacklight(BOOL on) {
 @property io_connect_t powerConnection;
 - (void)handleKeyboardEvent:(NSEvent *)event;
 - (void)beginWake:(NSString *)source;
+- (void)restoreSystemPresentationMode;
 @end
 
 static void powerCallback(void *context, io_service_t service, natural_t messageType, void *messageArgument) {
@@ -123,13 +152,6 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     GestureDetectorReset(&_gestures);
 
     _blankBar = [NSTouchBar new];
-    _functionBar = [NSTouchBar new];
-    _functionBar.delegate = self;
-    NSMutableArray<NSTouchBarItemIdentifier> *items = [NSMutableArray array];
-    for (NSInteger n = 1; n <= 12; n++) {
-        [items addObject:[NSString stringWithFormat:@"local.touchbar.controller.f%ld", (long)n]];
-    }
-    _functionBar.defaultItemIdentifiers = items;
     return self;
 }
 
@@ -150,7 +172,7 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     if (!AXIsProcessTrusted()) {
         NSDictionary *options = @{(__bridge NSString *)kAXTrustedCheckOptionPrompt: @YES};
         AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
-        NSLog(@"Accessibility access is needed for F1–F12 button presses");
+        NSLog(@"Accessibility access is needed for keyboard shortcuts");
     }
     [self installEventMonitors];
     [self applyMode:YES];
@@ -159,6 +181,7 @@ static void powerCallback(void *context, io_service_t service, natural_t message
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
+    [self restoreSystemPresentationMode];
     [[NSWorkspace sharedWorkspace].notificationCenter removeObserver:self];
     if (self.powerConnection) {
         CFRunLoopRemoveSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(self.powerNotificationPort),
@@ -204,6 +227,29 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     [defaults setInteger:self.priorVisibleMode forKey:kPriorModeKey];
 }
 
+- (void)showSystemFunctionKeys {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if (![defaults objectForKey:kSavedSystemModeKey]) {
+        [defaults setObject:systemPresentationMode() ?: kUnsetSystemMode forKey:kSavedSystemModeKey];
+        [defaults synchronize];
+    }
+    if (![systemPresentationMode() isEqualToString:kFunctionKeysSystemMode]) {
+        setSystemPresentationMode(kFunctionKeysSystemMode);
+    }
+}
+
+- (void)restoreSystemPresentationMode {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *savedMode = [defaults stringForKey:kSavedSystemModeKey];
+    if (!savedMode) return;
+    if ([systemPresentationMode() isEqualToString:kFunctionKeysSystemMode]) {
+        NSString *mode = [savedMode isEqualToString:kUnsetSystemMode] ? nil : savedMode;
+        if (![mode isEqualToString:kFunctionKeysSystemMode] && !setSystemPresentationMode(mode)) return;
+    }
+    [defaults removeObjectForKey:kSavedSystemModeKey];
+    [defaults synchronize];
+}
+
 - (void)presentBar:(NSTouchBar *)bar force:(BOOL)force {
     if (!force && self.currentBar == bar) return;
     if (self.currentBar) [NSTouchBar minimizeSystemModalTouchBar:self.currentBar];
@@ -214,6 +260,8 @@ static void powerCallback(void *context, io_service_t service, natural_t message
 - (void)applyMode:(BOOL)force {
     BarMode displayedMode = self.mode == BarModeOff && self.fnHeld
         ? self.priorVisibleMode : self.mode;
+    if (self.mode == BarModeFunctions) [self showSystemFunctionKeys];
+    else [self restoreSystemPresentationMode];
     switch (displayedMode) {
         case BarModeOff:
             [self presentBar:self.blankBar force:force];
@@ -226,7 +274,8 @@ static void powerCallback(void *context, io_service_t service, natural_t message
             break;
         case BarModeFunctions:
             if (!self.wakeRecoveryPending) setBacklight(YES);
-            [self presentBar:self.functionBar force:force];
+            if (self.currentBar) [NSTouchBar minimizeSystemModalTouchBar:self.currentBar];
+            self.currentBar = nil;
             break;
     }
     [self saveMode];
@@ -310,48 +359,6 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     finishWakeMeasurement(self.wakeCycle);
     self.wakeRecoveryPending = NO;
     [self applyMode:YES];
-}
-
-- (NSTouchBarItem *)touchBar:(NSTouchBar *)bar makeItemForIdentifier:(NSTouchBarItemIdentifier)identifier {
-    (void)bar;
-    NSString *prefix = @"local.touchbar.controller.f";
-    if (![identifier hasPrefix:prefix]) return nil;
-    NSInteger number = [[identifier substringFromIndex:prefix.length] integerValue];
-    if (number < 1 || number > 12) return nil;
-    return [NSButtonTouchBarItem buttonTouchBarItemWithIdentifier:identifier
-                                                           title:[NSString stringWithFormat:@"F%ld", (long)number]
-                                                          target:self action:@selector(functionKeyTapped:)];
-}
-
-- (void)functionKeyTapped:(NSButtonTouchBarItem *)item {
-    static const CGKeyCode codes[] = {
-        kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6,
-        kVK_F7, kVK_F8, kVK_F9, kVK_F10, kVK_F11, kVK_F12,
-    };
-    NSInteger number = [[item.identifier substringFromIndex:@"local.touchbar.controller.f".length] integerValue];
-    if (number < 1 || number > 12) return;
-    if (!CGPreflightPostEventAccess()) {
-        NSLog(@"F%ld tapped, but keyboard event posting is not permitted", (long)number);
-        CGRequestPostEventAccess();
-        return;
-    }
-    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-    if (!source) {
-        NSLog(@"Could not create event source for F%ld", (long)number);
-        return;
-    }
-    CGEventRef down = CGEventCreateKeyboardEvent(source, codes[number - 1], true);
-    CGEventRef up = CGEventCreateKeyboardEvent(source, codes[number - 1], false);
-    if (down && up) {
-        CGEventPost(kCGHIDEventTap, down);
-        CGEventPost(kCGHIDEventTap, up);
-        NSLog(@"Posted F%ld key press", (long)number);
-    } else {
-        NSLog(@"Could not create keyboard events for F%ld", (long)number);
-    }
-    if (down) CFRelease(down);
-    if (up) CFRelease(up);
-    CFRelease(source);
 }
 
 - (void)handleKeyboardEvent:(NSEvent *)event {
