@@ -77,6 +77,7 @@ static void setBacklight(BOOL on) {
 @property (strong) NSTouchBar *currentBar;
 @property BarMode mode;
 @property BarMode priorVisibleMode;
+@property BOOL fnHeld;
 @property BOOL wakeRecoveryPending;
 @property uint64_t wakeCycle;
 @property double wakeStartMs;
@@ -211,7 +212,9 @@ static void powerCallback(void *context, io_service_t service, natural_t message
 }
 
 - (void)applyMode:(BOOL)force {
-    switch (self.mode) {
+    BarMode displayedMode = self.mode == BarModeOff && self.fnHeld
+        ? self.priorVisibleMode : self.mode;
+    switch (displayedMode) {
         case BarModeOff:
             [self presentBar:self.blankBar force:force];
             setBacklight(NO);
@@ -227,7 +230,7 @@ static void powerCallback(void *context, io_service_t service, natural_t message
             break;
     }
     [self saveMode];
-    NSLog(@"Touch Bar mode=%ld", (long)self.mode);
+    NSLog(@"Touch Bar mode=%ld displayedMode=%ld", (long)self.mode, (long)displayedMode);
 }
 
 - (void)toggleCommand {
@@ -265,6 +268,7 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     requestBacklight(NO, self.wakeCycle, self.wakeStartMs);
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reapplyAfterWake) object:nil];
     if (firstSignal) {
+        self.fnHeld = NO;
         GestureDetectorReset(&_gestures);
         // The first power message can precede the Touch Bar HID service becoming ready.
         uint64_t wakeCycle = self.wakeCycle;
@@ -361,6 +365,11 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     }
     if (event.type != NSEventTypeFlagsChanged) return;
     CGKeyCode keyCode = event.keyCode;
+    BOOL fnHeld = (event.modifierFlags & NSEventModifierFlagFunction) != 0;
+    if (self.fnHeld != fnHeld) {
+        self.fnHeld = fnHeld;
+        if (self.mode == BarModeOff) [self applyMode:NO];
+    }
     Gesture modifier = GestureNone;
     NSEventModifierFlags ownFlag = 0;
     if (keyCode == kVK_Command || keyCode == kVK_RightCommand) {

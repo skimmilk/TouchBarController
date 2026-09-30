@@ -35,6 +35,7 @@ These commands control the hardware backlight directly. They do not change the b
 
 - Double-tap **Command** within 0.3 seconds to switch the Touch Bar off or restore the last visible mode.
 - Double-tap **Option** within 0.3 seconds to switch between the normal Touch Bar and F1–F12.
+- Hold **Fn** while the Touch Bar is off to show the last visible mode temporarily. Releasing Fn turns it off again.
 
 The selected mode survives app restarts. After sleep or lid open, the app requests the backlight off when system power-on begins, retries every 10 ms for about 500 ms while the hardware comes online, and repeats the request after power-on and at the workspace wake notification. It restores the selected mode two seconds after the last signal. If the mode was off before sleep, it stays off.
 
