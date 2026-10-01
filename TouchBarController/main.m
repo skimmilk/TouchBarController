@@ -1,5 +1,5 @@
 #import <AppKit/AppKit.h>
-#import <Carbon/Carbon.h>
+#import <Carbon/Carbon.h> // Virtual-key constants only; no Carbon runtime linkage.
 #import <IOKit/IOMessage.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #import <time.h>
@@ -41,7 +41,9 @@ static double monotonicTimeMs(void) {
 static dispatch_queue_t backlightQueue(void) {
     static dispatch_queue_t queue;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ queue = dispatch_queue_create("local.touchbar.backlight", DISPATCH_QUEUE_SERIAL); });
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("local.touchbar.backlight", DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL);
+    });
     return queue;
 }
 
@@ -495,11 +497,16 @@ int main(int argc, const char *argv[]) {
             fprintf(stderr, "TouchBarController is a background app; use touchbarctl for manual control.\n");
             return 2;
         }
-        [NSApplication sharedApplication];
-        [[NSProcessInfo processInfo] disableAutomaticTermination:@"Touch Bar shortcut and wake monitor"];
-        [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-        TouchBarController *controller = [TouchBarController new];
-        NSApp.delegate = controller;
+        // Drain initialization temporaries before entering the long-running
+        // AppKit loop, while retaining its delegate for the full run.
+        __attribute__((objc_precise_lifetime)) TouchBarController *controller;
+        @autoreleasepool {
+            [NSApplication sharedApplication];
+            [[NSProcessInfo processInfo] disableAutomaticTermination:@"Touch Bar shortcut and wake monitor"];
+            [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+            controller = [TouchBarController new];
+            NSApp.delegate = controller;
+        }
         [NSApp run];
     }
     return 0;

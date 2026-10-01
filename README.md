@@ -76,6 +76,8 @@ Testing revealed that off/on can leave the panel at minimum brightness even with
 
 The background app keeps its brightness client ready in-process, presents a blank system-modal Touch Bar when off, and selects macOS's native Function Keys presentation for function mode. Turning the backlight off changes `AppleARMBacklight` under `backlight-dfr` to `CurrentPowerState = 0`; it does not fully power down the Touch Bar display or controller. This behavior is unsupported by Apple and could change with a macOS update.
 
+The app drains startup temporaries before entering the AppKit event loop and uses an autorelease pool for each asynchronous backlight task. It does not explicitly link the Carbon runtime; its keyboard constants only require Carbon headers. These cleanups did not materially reduce the measured idle physical footprint, which remained approximately 12 MB on the tested Mac. An allocator-reclamation experiment released no pages and was not retained. This build adds no recurring memory-management work.
+
 ### Panel recovery investigation
 
 On the tested Apple Silicon machine, the Touch Bar framebuffer is `AppleMobileADBE0`, identified by its `dfr = true` property. The kernel's `AppleSummitLCD` driver has a separate panel power sequence involving PMU supply control, reset and power GPIOs, and delays. Merely requesting an API display power state does not establish that this sequence ran.

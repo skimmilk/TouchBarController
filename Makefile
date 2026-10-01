@@ -18,24 +18,24 @@ test: $(BUILD_DIR)/wake-recovery-tests $(BUILD_DIR)/brightness-restoration-tests
 	./$(BUILD_DIR)/wake-recovery-tests
 	./$(BUILD_DIR)/brightness-restoration-tests
 
-$(BUILD_DIR)/brightness-restoration-tests: Tests/BrightnessRestorationTests.m CLI/BacklightControl.m CLI/BacklightControl.h
+$(BUILD_DIR)/brightness-restoration-tests: Tests/BrightnessRestorationTests.m CLI/BacklightControl.m CLI/BacklightControl.h Makefile
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -fblocks -framework Foundation -framework IOKit Tests/BrightnessRestorationTests.m -o $@
 
-$(BUILD_DIR)/wake-recovery-tests: Tests/WakeRecoveryTests.m TouchBarController/main.m TouchBarController/GestureDetector.c TouchBarController/GestureDetector.h CLI/BacklightControl.h
+$(BUILD_DIR)/wake-recovery-tests: Tests/WakeRecoveryTests.m TouchBarController/main.m TouchBarController/GestureDetector.c TouchBarController/GestureDetector.h CLI/BacklightControl.h Makefile
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework Carbon -framework IOKit Tests/WakeRecoveryTests.m TouchBarController/GestureDetector.c -o $@
+	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework IOKit Tests/WakeRecoveryTests.m TouchBarController/GestureDetector.c -o $@
 
-$(CLI): CLI/main.m CLI/BacklightControl.m CLI/BacklightControl.h
+$(CLI): CLI/main.m CLI/BacklightControl.m CLI/BacklightControl.h Makefile
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -fblocks -framework Foundation -framework IOKit CLI/main.m CLI/BacklightControl.m -o $@
 	codesign --force --sign - $@
 
-$(APP_BINARY): TouchBarController/main.m TouchBarController/GestureDetector.c TouchBarController/GestureDetector.h TouchBarController/Info.plist CLI/BacklightControl.m CLI/BacklightControl.h $(CLI)
+$(APP_BINARY): TouchBarController/main.m TouchBarController/GestureDetector.c TouchBarController/GestureDetector.h TouchBarController/Info.plist CLI/BacklightControl.m CLI/BacklightControl.h $(CLI) Makefile
 	mkdir -p $(APP)/Contents/MacOS
 	cp TouchBarController/Info.plist $(APP)/Contents/Info.plist
 	cp $(CLI) $(APP)/Contents/MacOS/touchbarctl
-	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework Carbon -framework IOKit TouchBarController/main.m TouchBarController/GestureDetector.c CLI/BacklightControl.m -o $@
+	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework IOKit TouchBarController/main.m TouchBarController/GestureDetector.c CLI/BacklightControl.m -o $@
 	codesign --force --sign - $(APP)
 
 install: all
