@@ -88,6 +88,35 @@ static void setBacklight(BOOL on) {
     requestBacklight(on, 0, 0);
 }
 
+// One hardware check after the final wake off request has settled. No idle
+// polling or repeated off writes: macOS only re-enables this bar during wake.
+static void recoverOffAfterWake(uint64_t generation) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), backlightQueue(), ^{
+        if (atomic_load(&backlightGeneration) != generation) return;
+        int state = TouchBarBacklightPowerState();
+        if (state <= 0) return;
+        NSLog(@"Touch Bar hardware remains on after wake off requests; attempting on/off recovery");
+        // The repair keeps the blank bar and saved off mode. Do not schedule
+        // brightness restoration during this temporary on transition.
+        if (!TouchBarSetBacklight(YES)) {
+            performBacklight(NO, 0, 0);
+            NSLog(@"Could not begin Touch Bar on/off recovery");
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 700 * NSEC_PER_MSEC), backlightQueue(), ^{
+            if (atomic_load(&backlightGeneration) != generation) return;
+            performBacklight(NO, 0, 0);
+            NSLog(@"Touch Bar on/off recovery: final off request sent");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), backlightQueue(), ^{
+                if (atomic_load(&backlightGeneration) != generation) return;
+                int finalState = TouchBarBacklightPowerState();
+                NSLog(@"Touch Bar recovery hardware backlight=%@",
+                      finalState < 0 ? @"unavailable" : finalState == 0 ? @"off" : @"on");
+            });
+        });
+    });
+}
+
 static NSString *systemPresentationMode(void) {
     CFPreferencesAppSynchronize(CFSTR("com.apple.touchbar.agent"));
     id value = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PresentationModeGlobal"),
@@ -408,6 +437,9 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     finishWakeMeasurement(self.wakeCycle);
     self.wakeRecoveryPending = NO;
     [self applyMode:YES];
+    if (self.mode == BarModeOff && !self.fnHeld) {
+        recoverOffAfterWake(atomic_load(&backlightGeneration));
+    }
 }
 
 - (void)handleKeyboardEvent:(NSEvent *)event {

@@ -5,6 +5,8 @@
 #import <dlfcn.h>
 #import <objc/message.h>
 #import <math.h>
+#import <IOKit/IOKitLib.h>
+#import <string.h>
 
 static id brightnessClient;
 static id systemBrightnessClient;
@@ -13,6 +15,43 @@ static BOOL backlightSuppressed;
 static BOOL brightnessRestorePending;
 static CFStringRef const brightnessPreferences = CFSTR("local.touchbar.controller");
 static CFStringRef const brightnessPreferenceKey = CFSTR("SavedTouchBarBrightness");
+
+static id backlightDriverProperty(NSString *key) {
+    io_iterator_t iterator = IO_OBJECT_NULL;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleARMBacklight"), &iterator) != KERN_SUCCESS) return nil;
+    id value = nil;
+    io_object_t service;
+    while ((service = IOIteratorNext(iterator))) {
+        io_object_t parent = IO_OBJECT_NULL;
+        char parentName[128] = {0};
+        if (IORegistryEntryGetParentEntry(service, kIOServicePlane, &parent) == KERN_SUCCESS) {
+            IORegistryEntryGetName(parent, parentName);
+            IOObjectRelease(parent);
+        }
+        BOOL isTouchBar = strcmp(parentName, "backlight-dfr") == 0;
+        if (isTouchBar) {
+            value = CFBridgingRelease(IORegistryEntryCreateCFProperty(service, (__bridge CFStringRef)key,
+                                                                      kCFAllocatorDefault, 0));
+        }
+        IOObjectRelease(service);
+        if (isTouchBar) break;
+    }
+    IOObjectRelease(iterator);
+    return value;
+}
+
+int TouchBarBacklightPowerState(void) {
+    id power = backlightDriverProperty(@"IOPowerManagement");
+    id value = [power isKindOfClass:[NSDictionary class]] ? power[@"CurrentPowerState"] : nil;
+    return [value isKindOfClass:[NSNumber class]] ? [value intValue] : -1;
+}
+
+double TouchBarBacklightNits(void) {
+    id value = backlightDriverProperty(@"CurrentNits");
+    if (![value isKindOfClass:[NSNumber class]]) return -1;
+    double nits = [value doubleValue];
+    return isfinite(nits) && nits >= 0 ? nits : -1;
+}
 
 static id coreBrightnessClient(void) {
     if (systemBrightnessClient) return systemBrightnessClient;
@@ -110,6 +149,42 @@ static id createBrightnessClient(void) {
     CFRelease(services);
     CFRelease(system);
     return ready ? client : nil;
+}
+
+NSDictionary<NSString *, id> *TouchBarBrightnessDiagnostics(void) {
+    NSMutableDictionary *values = [NSMutableDictionary new];
+    values[@"driver.IODisplayParameters"] = backlightDriverProperty(@"IODisplayParameters") ?: [NSNull null];
+    id saved = CFBridgingRelease(CFPreferencesCopyAppValue(brightnessPreferenceKey, brightnessPreferences));
+    values[@"saved_restore_brightness"] = validBrightness(saved) ? saved : [NSNull null];
+
+    id dfr = brightnessClient ?: createBrightnessClient();
+    SEL getDFR = sel_registerName("copyPropertyForKey:");
+    values[@"dfr.DFRDisplayState"] = [dfr respondsToSelector:getDFR]
+        ? ((id (*)(id, SEL, id))objc_msgSend)(dfr, getDFR, @"DFRDisplayState") ?: [NSNull null] : [NSNull null];
+    SEL getStep = sel_registerName("getDimmingStep");
+    values[@"dfr.cached_dimming_step"] = [dfr respondsToSelector:getStep]
+        ? @(((NSInteger (*)(id, SEL))objc_msgSend)(dfr, getStep)) : [NSNull null];
+    SEL getID = sel_registerName("getDFRDisplayID");
+    int displayID = [dfr respondsToSelector:getID] ? ((int (*)(id, SEL))objc_msgSend)(dfr, getID) : -1;
+    values[@"display_id"] = displayID >= 0 ? @(displayID) : [NSNull null];
+
+    id core = coreBrightnessClient();
+    SEL getCore = sel_registerName("copyPropertyForKey:andDisplay:");
+    BOOL available = displayID >= 0 && [core respondsToSelector:getCore];
+    for (NSString *key in @[@"DisplayBrightness", @"DisplayBrightnessFactor", @"DisplayBrightnessAuto",
+                            @"BrightnessGlobalScalar", @"VirtualBrightnessLimits", @"MaxBrightness",
+                            @"FreezeBrightness", @"BrightnessRestrictions", @"DisplayPanelLuminanceMin",
+                            @"DisplayPanelLuminanceMid", @"DisplayPanelLuminanceMax",
+                            @"DisplayProductLuminanceMin", @"DisplayProductLuminanceMid", @"DisplayProductLuminanceMax"]) {
+        id value = available ? ((id (*)(id, SEL, id, uint64_t))objc_msgSend)(core, getCore, key, displayID) : nil;
+        values[[@"corebrightness." stringByAppendingString:key]] = value ?: [NSNull null];
+    }
+    id status = available ? ((id (*)(id, SEL, id, uint64_t))objc_msgSend)(core, getCore, @"StatusInfo", displayID) : nil;
+    for (NSString *key in @[@"AutoBrightness", @"BrightnessControlCapabilities", @"Display"]) {
+        id value = [status isKindOfClass:[NSDictionary class]] ? status[key] : nil;
+        values[[@"corebrightness.StatusInfo." stringByAppendingString:key]] = value ?: [NSNull null];
+    }
+    return values;
 }
 
 BOOL TouchBarSetBacklight(BOOL on) {

@@ -5,32 +5,15 @@
 
 #import "BacklightControl.h"
 
-static int backlightPowerState(void) {
-    io_iterator_t iterator = IO_OBJECT_NULL;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleARMBacklight"), &iterator) != KERN_SUCCESS) return -1;
-    int state = -1;
-    io_object_t service;
-    while ((service = IOIteratorNext(iterator))) {
-        io_object_t parent = IO_OBJECT_NULL;
-        char parentName[128] = {0};
-        if (IORegistryEntryGetParentEntry(service, kIOServicePlane, &parent) == KERN_SUCCESS) {
-            IORegistryEntryGetName(parent, parentName);
-            IOObjectRelease(parent);
+static void printBrightnessProperties(NSString *prefix, id value) {
+    if ([value isKindOfClass:[NSDictionary class]] && [value count] > 0) {
+        for (NSString *key in [[value allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+            printBrightnessProperties([prefix stringByAppendingFormat:@".%@", key], value[key]);
         }
-        if (strcmp(parentName, "backlight-dfr") == 0) {
-            CFTypeRef power = IORegistryEntryCreateCFProperty(service, CFSTR("IOPowerManagement"), kCFAllocatorDefault, 0);
-            if (power && CFGetTypeID(power) == CFDictionaryGetTypeID()) {
-                CFTypeRef value = CFDictionaryGetValue(power, CFSTR("CurrentPowerState"));
-                if (value && CFGetTypeID(value) == CFNumberGetTypeID()) {
-                    CFNumberGetValue(value, kCFNumberIntType, &state);
-                }
-            }
-            if (power) CFRelease(power);
-        }
-        IOObjectRelease(service);
+    } else {
+        printf("%s=%s\n", prefix.UTF8String,
+               value && value != [NSNull null] ? [[value description] UTF8String] : "unavailable");
     }
-    IOObjectRelease(iterator);
-    return state;
 }
 
 static BOOL diagnoseDisplay(void) {
@@ -65,15 +48,25 @@ int main(int argc, const char *argv[]) {
             return 2;
         }
         if (strcmp(argv[1], "diagnose") == 0) {
-            int state = backlightPowerState();
+            int state = TouchBarBacklightPowerState();
             printf("backlight=%s\n", state < 0 ? "unavailable" : state == 0 ? "off" : "on");
+            puts("backlight_source=backlight-dfr/AppleARMBacklight.IOPowerManagement.CurrentPowerState");
+            if (state < 0) puts("backlight_power_state=unavailable");
+            else printf("backlight_power_state=%d\n", state);
+            double nits = TouchBarBacklightNits();
+            if (nits < 0) puts("backlight_nits=unavailable");
+            else printf("backlight_nits=%.3f\n", nits);
+            puts("backlight_nits_source=backlight-dfr/AppleARMBacklight.CurrentNits");
             BOOL found = diagnoseDisplay();
             if (!found) fprintf(stderr, "Touch Bar framebuffer status is unavailable\n");
+            printBrightnessProperties(@"brightness", TouchBarBrightnessDiagnostics());
+            puts("Backlight state is read from the hardware driver, independently of DFRDisplayState.");
+            puts("Brightness properties may retain the last requested level while power is off; they are not physical luminance measurements.");
             puts("These are driver states; they do not establish whether the panel is working.");
             return state >= 0 && found ? 0 : 1;
         }
         if (strcmp(argv[1], "status") == 0) {
-            int state = backlightPowerState();
+            int state = TouchBarBacklightPowerState();
             if (state < 0) {
                 fprintf(stderr, "Touch Bar backlight status is unavailable\n");
                 return 1;
