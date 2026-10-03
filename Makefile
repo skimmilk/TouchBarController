@@ -14,9 +14,14 @@ AGENT_LABEL = local.touchbar.controller
 all: $(CLI) $(APP_BINARY)
 app: $(APP_BINARY)
 
-test: $(BUILD_DIR)/wake-recovery-tests $(BUILD_DIR)/brightness-restoration-tests
+test: $(BUILD_DIR)/wake-recovery-tests $(BUILD_DIR)/brightness-restoration-tests $(BUILD_DIR)/fn-wake-tests
 	./$(BUILD_DIR)/wake-recovery-tests
 	./$(BUILD_DIR)/brightness-restoration-tests
+	./$(BUILD_DIR)/fn-wake-tests
+
+$(BUILD_DIR)/fn-wake-tests: Tests/FnWakeTests.m TouchBarController/main.m TouchBarController/GestureDetector.c TouchBarController/GestureDetector.h CLI/BacklightControl.h Makefile
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -fblocks -framework AppKit -framework IOKit Tests/FnWakeTests.m TouchBarController/GestureDetector.c -o $@
 
 $(BUILD_DIR)/brightness-restoration-tests: Tests/BrightnessRestorationTests.m CLI/BacklightControl.m CLI/BacklightControl.h Makefile
 	mkdir -p $(BUILD_DIR)
@@ -75,6 +80,14 @@ uninstall:
 	@if [ -x "$(INSTALLED_CLI)" ]; then "$(INSTALLED_CLI)" on || echo "Warning: could not restore Touch Bar backlight" >&2; \
 	elif [ -x "$(CLI)" ]; then "$(CLI)" on || echo "Warning: could not restore Touch Bar backlight" >&2; \
 	else echo "Warning: touchbarctl is unavailable; could not restore Touch Bar backlight" >&2; fi
+	@previous=$$(defaults read $(AGENT_LABEL) SavedSystemPresentationModeFnModes 2>/dev/null) || previous=; \
+		applied=$$(defaults read $(AGENT_LABEL) SuppressedSystemPresentationModeFnModes 2>/dev/null) || applied=; \
+		current=$$(defaults read com.apple.touchbar.agent PresentationModeFnModes 2>/dev/null) || current=; \
+		if [ -n "$$previous" ] && [ -n "$$applied" ] && [ "$$current" = "$$applied" ]; then \
+			if [ "$$previous" = __unset__ ]; then defaults delete com.apple.touchbar.agent PresentationModeFnModes; \
+			else defaults write com.apple.touchbar.agent PresentationModeFnModes "$$previous"; fi; \
+			killall ControlStrip 2>/dev/null || true; \
+		fi
 	@tccutil reset Accessibility $(AGENT_LABEL) || echo "Warning: could not reset Accessibility access for $(AGENT_LABEL)" >&2
 	@tccutil reset PostEvent $(AGENT_LABEL) || echo "Warning: could not reset keyboard event-posting access for $(AGENT_LABEL)" >&2
 	@if defaults read "$(AGENT_LABEL)" >/dev/null 2>&1; then defaults delete "$(AGENT_LABEL)"; fi

@@ -4,6 +4,7 @@
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #import <time.h>
 #import <stdatomic.h>
+#import <dlfcn.h>
 
 #import "../CLI/BacklightControl.h"
 #import "GestureDetector.h"
@@ -24,6 +25,8 @@ typedef NS_ENUM(NSInteger, BarMode) {
 static NSString *const kModeKey = @"TouchBarMode";
 static NSString *const kPriorModeKey = @"PriorVisibleTouchBarMode";
 static NSString *const kSavedSystemModeKey = @"SavedSystemPresentationModeGlobal";
+static NSString *const kSavedSystemFnModesKey = @"SavedSystemPresentationModeFnModes";
+static NSString *const kSuppressedSystemFnModesKey = @"SuppressedSystemPresentationModeFnModes";
 static NSString *const kUnsetSystemMode = @"__unset__";
 static NSString *const kFunctionKeysSystemMode = @"functionKeys";
 static NSString *const kTrayIdentifier = @"local.touchbar.controller.tray";
@@ -145,12 +148,61 @@ static BOOL setSystemPresentationMode(NSString *mode) {
     return YES;
 }
 
+static NSDictionary *systemFnModes(void) {
+    CFPreferencesAppSynchronize(CFSTR("com.apple.touchbar.agent"));
+    id value = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("PresentationModeFnModes"),
+                                                         CFSTR("com.apple.touchbar.agent")));
+    return [value isKindOfClass:[NSDictionary class]] ? value : nil;
+}
+
+static NSArray<NSString *> *presentationModeKeys(void) {
+    // DFRFoundation's presentation enum on the supported macOS versions.
+    return @[@"appWithControlStrip", @"fullControlStrip", @"functionKeys", @"app",
+             @"spaces", @"spacesWithControlStrip", @"workflows", @"workflowsWithControlStrip"];
+}
+
+static NSDictionary *unchangedFnModes(void) {
+    NSArray *keys = presentationModeKeys();
+    return [NSDictionary dictionaryWithObjects:keys forKeys:keys];
+}
+
+static BOOL setSystemFnModes(NSDictionary *modes) {
+    static void (*setFnBehavior)(NSUInteger, NSUInteger);
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *framework = dlopen("/System/Library/PrivateFrameworks/DFRFoundation.framework/DFRFoundation",
+                                 RTLD_LAZY | RTLD_LOCAL);
+        if (framework) setFnBehavior = dlsym(framework, "DFRPresentationModeSetFNBehavior");
+    });
+    if (!setFnBehavior) {
+        NSLog(@"Could not load native Touch Bar Fn presentation control");
+        return NO;
+    }
+    NSArray<NSString *> *keys = presentationModeKeys();
+    for (NSUInteger index = 0; index < keys.count; index++) {
+        NSString *target = modes[keys[index]];
+        NSUInteger targetIndex = target ? [keys indexOfObject:target] : NSNotFound;
+        // Native defaults: Fn shows function keys, except from function mode,
+        // where it shows the expanded Control Strip.
+        if (targetIndex == NSNotFound) targetIndex = index == 2 ? 1 : 2;
+        setFnBehavior(index, targetIndex);
+    }
+    // The native setter notifies the Touch Bar server immediately. Preserve
+    // the exact preference dictionary (including unset/default entries), too.
+    CFPreferencesSetAppValue(CFSTR("PresentationModeFnModes"), (__bridge CFPropertyListRef)modes,
+                             CFSTR("com.apple.touchbar.agent"));
+    return CFPreferencesAppSynchronize(CFSTR("com.apple.touchbar.agent"));
+}
+
 @interface TouchBarController : NSObject <NSApplicationDelegate>
 @property (strong) NSTouchBar *blankBar;
 @property (strong) NSTouchBar *currentBar;
 @property BarMode mode;
 @property BarMode priorVisibleMode;
 @property BOOL fnHeld;
+@property BOOL suppressFnPress;
+@property CFMachPortRef fnEventTap;
+@property CFRunLoopSourceRef fnEventSource;
 @property BOOL wakeRecoveryPending;
 @property BOOL sleeping;
 @property uint64_t wakeCycle;
@@ -163,10 +215,24 @@ static BOOL setSystemPresentationMode(NSString *mode) {
 @property io_object_t powerNotifier;
 @property io_connect_t powerConnection;
 - (void)handleKeyboardEvent:(NSEvent *)event;
+- (CGEventRef)filterFnEvent:(CGEventRef)event type:(CGEventType)type;
+- (void)installFnEventTap;
 - (void)beginWake:(NSString *)source;
 - (void)prepareForSleep;
 - (void)restoreSystemPresentationMode;
+- (void)restoreSystemFnModes;
 @end
+
+static CGEventRef fnEventCallback(CGEventTapProxy proxy, CGEventType type,
+                                 CGEventRef event, void *context) {
+    (void)proxy;
+    TouchBarController *controller = (__bridge TouchBarController *)context;
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        CGEventTapEnable(controller.fnEventTap, true);
+        return event;
+    }
+    return [controller filterFnEvent:event type:type];
+}
 
 static void powerCallback(void *context, io_service_t service, natural_t messageType, void *messageArgument) {
     (void)service;
@@ -222,6 +288,7 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     [[NSWorkspace sharedWorkspace].notificationCenter addObserver:self
         selector:@selector(sessionBecameActive:) name:NSWorkspaceSessionDidBecomeActiveNotification object:nil];
     [self installEventMonitors];
+    [self installFnEventTap];
     [self applyMode:YES];
     NSLog(@"TouchBarController running; mode=%ld", (long)self.mode);
 }
@@ -232,6 +299,7 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     if (self.wakeRetryTimer) dispatch_source_cancel(self.wakeRetryTimer);
     atomic_fetch_add(&backlightGeneration, 1);
     [self restoreSystemPresentationMode];
+    [self restoreSystemFnModes];
     [[NSWorkspace sharedWorkspace].notificationCenter removeObserver:self];
     if (self.powerConnection) {
         CFRunLoopRemoveSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(self.powerNotificationPort),
@@ -241,6 +309,75 @@ static void powerCallback(void *context, io_service_t service, natural_t message
         IONotificationPortDestroy(self.powerNotificationPort);
     }
     [self removeEventMonitors];
+    if (self.fnEventSource) {
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), self.fnEventSource, kCFRunLoopCommonModes);
+        CFRelease(self.fnEventSource);
+        self.fnEventSource = NULL;
+    }
+    if (self.fnEventTap) {
+        CFMachPortInvalidate(self.fnEventTap);
+        CFRelease(self.fnEventTap);
+        self.fnEventTap = NULL;
+    }
+}
+
+- (void)installFnEventTap {
+    if (self.fnEventTap) return;
+    CGEventMask mask = CGEventMaskBit(kCGEventFlagsChanged) |
+                       CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp);
+    // The session tap is too late: macOS has already selected the Fn Touch Bar
+    // row by then. Filter where HID events enter WindowServer instead.
+    self.fnEventTap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap,
+                                     kCGEventTapOptionDefault, mask, fnEventCallback,
+                                     (__bridge void *)self);
+    if (!self.fnEventTap) {
+        NSLog(@"Optional Fn event filter unavailable; accessibility_trusted=%d. Native Touch Bar Fn presentation is handled separately.", AXIsProcessTrusted());
+        return;
+    }
+    self.fnEventSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, self.fnEventTap, 0);
+    CFRunLoopAddSource(CFRunLoopGetMain(), self.fnEventSource, kCFRunLoopCommonModes);
+    CGEventTapEnable(self.fnEventTap, true);
+    NSLog(@"Fn wake HID filter installed; enabled=%d", CGEventTapIsEnabled(self.fnEventTap));
+}
+
+- (BOOL)fnEventFilterPermissionGranted {
+    return AXIsProcessTrusted();
+}
+
+// Return whether this Fn press belongs to the wake shortcut. Keep the whole
+// press (including release) out of macOS's normal Fn handling. This previews
+// the visible controls without changing the saved off mode.
+- (BOOL)handleFnDown:(BOOL)down {
+    BOOL consume = self.suppressFnPress;
+    if (down && !self.fnHeld && self.mode == BarModeOff) {
+        NSLog(@"Fn wake shortcut; filter_active=%d", self.fnEventTap != NULL);
+        self.suppressFnPress = YES;
+        consume = YES;
+        GestureDetectorOtherKey(&_gestures);
+        // Presentation changes may restart ControlStrip; keep that work out of
+        // the synchronous event tap callback so it cannot time out.
+        dispatch_async(dispatch_get_main_queue(), ^{ [self applyMode:NO]; });
+    }
+    self.fnHeld = down;
+    if (!down) {
+        self.suppressFnPress = NO;
+        if (consume) dispatch_async(dispatch_get_main_queue(), ^{ [self applyMode:NO]; });
+    }
+    return consume;
+}
+
+- (CGEventRef)filterFnEvent:(CGEventRef)event type:(CGEventType)type {
+    CGEventFlags flags = CGEventGetFlags(event);
+    if (type == kCGEventFlagsChanged &&
+        CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == kVK_Function) {
+        if ([self handleFnDown:(flags & kCGEventFlagMaskSecondaryFn) != 0]) return NULL;
+    }
+    if (self.suppressFnPress) {
+        // Other modifiers and keys still work while the wake press is held,
+        // without reintroducing Fn into the downstream event stream.
+        CGEventSetFlags(event, flags & ~kCGEventFlagMaskSecondaryFn);
+    }
+    return event;
 }
 
 - (void)removeEventMonitors {
@@ -269,6 +406,7 @@ static void powerCallback(void *context, io_service_t service, natural_t message
 - (void)rebuildEventMonitors {
     [self removeEventMonitors];
     [self installEventMonitors];
+    [self installFnEventTap];
 }
 
 - (void)saveMode {
@@ -300,6 +438,46 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     [defaults synchronize];
 }
 
+- (void)suppressSystemFnModes {
+    NSUserDefaults *defaults = [self fnModeDefaults];
+    NSDictionary *modes = unchangedFnModes();
+    NSDictionary *current = [self nativeFnModes];
+    if (![defaults objectForKey:kSavedSystemFnModesKey] || ![current isEqual:modes]) {
+        // A setting edited while off becomes the new value to restore, even
+        // when the wake press needs to reapply our temporary override.
+        [defaults setObject:current ?: kUnsetSystemMode forKey:kSavedSystemFnModesKey];
+        [defaults setObject:modes forKey:kSuppressedSystemFnModesKey];
+        [defaults synchronize];
+    }
+    if (![current isEqual:modes] && ![self setNativeFnModes:modes]) {
+        NSLog(@"Could not suppress the native Fn Touch Bar row");
+    }
+}
+
+- (void)restoreSystemFnModes {
+    NSUserDefaults *defaults = [self fnModeDefaults];
+    id saved = [defaults objectForKey:kSavedSystemFnModesKey];
+    if (!saved) return;
+    // Preserve any independent changes made in System Settings while off.
+    if ([[self nativeFnModes] isEqual:unchangedFnModes()]) {
+        NSDictionary *modes = [saved isKindOfClass:[NSDictionary class]] ? saved : nil;
+        if (![self setNativeFnModes:modes]) return;
+    }
+    [defaults removeObjectForKey:kSavedSystemFnModesKey];
+    [defaults removeObjectForKey:kSuppressedSystemFnModesKey];
+    [defaults synchronize];
+}
+
+- (NSUserDefaults *)fnModeDefaults { return [NSUserDefaults standardUserDefaults]; }
+- (NSDictionary *)nativeFnModes { return systemFnModes(); }
+- (BOOL)setNativeFnModes:(NSDictionary *)modes { return setSystemFnModes(modes); }
+
+- (void)updateFnPresentation {
+    if (self.sleeping || self.wakeRecoveryPending) return;
+    if (self.mode == BarModeOff || self.suppressFnPress) [self suppressSystemFnModes];
+    else [self restoreSystemFnModes];
+}
+
 - (void)presentBar:(NSTouchBar *)bar force:(BOOL)force {
     if (!force && self.currentBar == bar) return;
     if (self.currentBar) [NSTouchBar minimizeSystemModalTouchBar:self.currentBar];
@@ -314,9 +492,10 @@ static void powerCallback(void *context, io_service_t service, natural_t message
         [self saveMode];
         return;
     }
-    BarMode displayedMode = self.mode == BarModeOff && self.fnHeld
+    BarMode displayedMode = self.mode == BarModeOff && self.fnHeld && self.suppressFnPress
         ? self.priorVisibleMode : self.mode;
-    if (self.mode == BarModeFunctions) [self showSystemFunctionKeys];
+    [self updateFnPresentation];
+    if (displayedMode == BarModeFunctions) [self showSystemFunctionKeys];
     else [self restoreSystemPresentationMode];
     switch (displayedMode) {
         case BarModeOff:
@@ -377,6 +556,7 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     if (self.wakeRecoveryPending) finishWakeMeasurement(self.wakeCycle);
     self.wakeRecoveryPending = NO;
     self.fnHeld = NO;
+    self.suppressFnPress = NO;
     GestureDetectorReset(&_gestures);
     setBacklight(NO);
 }
@@ -418,6 +598,7 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     dispatch_resume(timer);
     if (firstSignal) {
         self.fnHeld = NO;
+        self.suppressFnPress = NO;
         GestureDetectorReset(&_gestures);
         [self performSelector:@selector(rebuildEventMonitors) withObject:nil afterDelay:0.5];
         [self performSelector:@selector(rebuildEventMonitors) withObject:nil afterDelay:2.0];
@@ -439,7 +620,7 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     finishWakeMeasurement(self.wakeCycle);
     self.wakeRecoveryPending = NO;
     [self applyMode:YES];
-    if (self.mode == BarModeOff && !self.fnHeld) {
+    if (self.mode == BarModeOff && !(self.fnHeld && self.suppressFnPress)) {
         recoverOffAfterWake(atomic_load(&backlightGeneration));
     }
 }
@@ -455,10 +636,12 @@ static void powerCallback(void *context, io_service_t service, natural_t message
     }
     if (event.type != NSEventTypeFlagsChanged) return;
     CGKeyCode keyCode = event.keyCode;
-    BOOL fnHeld = (event.modifierFlags & NSEventModifierFlagFunction) != 0;
-    if (self.fnHeld != fnHeld) {
-        self.fnHeld = fnHeld;
-        if (self.mode == BarModeOff) [self applyMode:NO];
+    if (!self.fnEventTap && keyCode == kVK_Function) {
+        [self handleFnDown:(event.modifierFlags & NSEventModifierFlagFunction) != 0];
+        // Permission may have been granted while this process was running.
+        // Wait for release so an already-delivered Fn down is paired with its
+        // normal release before the new filter starts consuming whole presses.
+        if (!self.fnHeld && [self fnEventFilterPermissionGranted]) [self installFnEventTap];
     }
     Gesture modifier = GestureNone;
     NSEventModifierFlags ownFlag = 0;

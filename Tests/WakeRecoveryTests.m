@@ -24,6 +24,8 @@ int TouchBarBacklightPowerState(void) { powerReads++; return powerUnavailable ? 
 - (void)saveMode {}
 - (void)restoreSystemPresentationMode {}
 - (void)showSystemFunctionKeys {}
+- (void)suppressSystemFnModes {}
+- (void)restoreSystemFnModes {}
 - (void)presentBar:(NSTouchBar *)bar force:(BOOL)force { (void)bar; (void)force; }
 - (void)rebuildEventMonitors {}
 @end
@@ -120,18 +122,19 @@ int main(void) {
         NSCAssert(snapshot().count == offCount && readCount() == reads,
                   @"Idle state changes triggered polling or backlight writes");
 
-        // Fn and ordinary off changes only send their requested state.
-        controller.fnHeld = YES;
-        [controller applyMode:NO];
-        drain();
-        count = snapshot().count;
-        NSCAssert(snapshot().lastObject.boolValue, @"Fn did not show the preview");
-        runLoopFor(0.3);
-        NSCAssert(snapshot().count == count, @"Idle work blanked the Fn preview");
+        // Fn previews the visible mode only while held; release sends off.
         controller.fnHeld = NO;
-        [controller applyMode:NO];
-        drain();
-        NSCAssert(!snapshot().lastObject.boolValue, @"Fn release did not turn off");
+        [controller handleFnDown:YES];
+        runLoopFor(0.02);
+        count = snapshot().count;
+        NSCAssert(snapshot().lastObject.boolValue && controller.mode == BarModeOff,
+                  @"Fn did not preview the visible mode with off still selected");
+        runLoopFor(0.3);
+        NSCAssert(snapshot().count == count, @"Idle work blanked the Fn wake");
+        [controller handleFnDown:NO];
+        runLoopFor(0.02);
+        NSCAssert(snapshot().count == count + 1 && !snapshot().lastObject.boolValue,
+                  @"Fn release did not turn the bar off");
         count = snapshot().count;
         runLoopFor(0.9);
         NSCAssert(snapshot().count == count && readCount() == reads,
